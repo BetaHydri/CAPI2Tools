@@ -176,6 +176,34 @@ Describe 'Get-CapiDot1xDiagnosis' {
     }
 }
 
+Describe 'Convert-Dot1xRejection (real-world 6273, anonymized)' {
+
+    BeforeAll {
+        # Modeled on a real PEAP denial on a wired port: reason code 265, machine authentication
+        $Xml = '<Event><EventData><Data Name="SubjectUserName">host/pc01.corp.contoso.com</Data><Data Name="FullyQualifiedSubjectUserName">CONTOSO\PC01$</Data><Data Name="CalledStationID">00-11-22-33-44-55</Data><Data Name="CallingStationID">AA-BB-CC-DD-EE-FF</Data><Data Name="NASIPv4Address">10.0.0.10</Data><Data Name="ClientName">SW-ACCESS-01</Data><Data Name="NetworkPolicyName">802.1X-Wired</Data><Data Name="AuthenticationType">PEAP</Data><Data Name="EAPType">-</Data><Data Name="ReasonCode">265</Data><Data Name="Reason">The certificate chain was issued by an authority that is not trusted.</Data></EventData></Event>'
+        $Script:RealEvent = [PSCustomObject]@{ TimeCreated = (Get-Date); Id = 6273 }
+        $Script:RealEvent | Add-Member -MemberType NoteProperty -Name Xml -Value $Xml
+        $Script:RealEvent | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $this.Xml }
+    }
+
+    It 'extracts account, switch and policy details' {
+        $Row = InModuleScope CAPI2Tools -Parameters @{ Event = $Script:RealEvent } { param($Event) Convert-Dot1xRejection -Event $Event }
+        $Row.UserName | Should -Be 'CONTOSO\PC01$'
+        $Row.AccountName | Should -Be 'host/pc01.corp.contoso.com'
+        $Row.NasIPv4Address | Should -Be '10.0.0.10'
+        $Row.ClientName | Should -Be 'SW-ACCESS-01'
+        $Row.AuthenticationType | Should -Be 'PEAP'
+        $Row.ReasonCode | Should -Be 265
+        $Row.CertificateRelated | Should -BeTrue
+    }
+
+    It 'has a concrete recommendation for reason code 265' {
+        InModuleScope CAPI2Tools {
+            $Script:Dot1xReasonGuidance[265] | Should -Match 'NTAuth'
+        }
+    }
+}
+
 Describe 'ConvertTo-Dot1xAuditStatus' {
 
     It 'parses English and German settings' {

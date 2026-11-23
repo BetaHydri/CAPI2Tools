@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.14.3] - 2026-11-23
+
+### Added
+- `Get-CapiDot1xDiagnosis`: NPS rejections now contain `AccountName` (shows `host/...` for machine authentication), `CalledStationID` and `NasIPv4Address` (locates the switch/access point); the HTML report shows account and NAS address
+- Concrete recommendation for NPS reason code 265 ("certificate chain was issued by an authority that is not trusted"): fix the Trusted Root/Intermediate store and NTAuth on the NPS
+- README: annotated real-world 6273 example (anonymized) with field-to-property mapping; pester test modeled on it
+
+---
+
 ## [2.14.2] - 2026-11-23
 
 ### Documentation

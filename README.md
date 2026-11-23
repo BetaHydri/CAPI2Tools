@@ -1,6 +1,6 @@
 # CAPI2 Event Log Correlation Toolkit
 
-[![Version](https://img.shields.io/badge/version-2.14.2-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
+[![Version](https://img.shields.io/badge/version-2.14.3-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://github.com/PowerShell/PowerShell)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
@@ -370,6 +370,40 @@ $Diag = Get-CapiDot1xDiagnosis -Role Nps -Hours 1
 $Diag.NpsRejections | Format-Table TimeCreated, UserName, CallingStationID, ReasonCode, CorrelatedErrors
 $Diag.CapiChains[0].Events | Get-CapiErrorAnalysis -ShowEventChain
 ```
+
+#### Example: reading a real 6273 event (PEAP on a wired port, reason code 265)
+
+The Event Viewer shows this for a denied machine authentication (names anonymized):
+
+```text
+Event 6273 - Network Policy Server denied access to a user.
+User:           Account Name: host/pc01.corp.contoso.com   Fully Qualified Account Name: CONTOSO\PC01$
+Client Machine: Calling Station Identifier: AA-BB-CC-DD-EE-FF
+NAS:            NAS IPv4 Address: 10.0.0.10   NAS Port-Type: Ethernet
+RADIUS Client:  Client Friendly Name: SW-ACCESS-01
+Authentication: Network Policy Name: 802.1X-Wired   Authentication Type: PEAP   EAP Type: -
+                Reason Code: 265   Reason: The certificate chain was issued by an authority that is not trusted.
+```
+
+How the tool reports it (`Get-CapiDot1xDiagnosis -Role Nps`, **on the NPS server**):
+
+| Event Viewer field | Property in `NpsRejections` |
+|--------------------|-----------------------------|
+| Account Name / Fully Qualified Account Name | `AccountName` (`host/...` means machine authentication) / `UserName` |
+| Calling Station Identifier | `CallingStationID` (MAC address of the client) |
+| NAS IPv4 Address / Client Friendly Name | `NasIPv4Address` / `ClientName` (the switch or access point, so you know where to look) |
+| Authentication Type / EAP Type | `AuthenticationType` / `EapType` (the EAP type is often empty with PEAP) |
+| Reason Code / Reason | `ReasonCode` / `Reason`, flagged as `CertificateRelated` |
+
+```text
+[Critical] NPS Security log: Reason code 265: The certificate chain was issued by an authority that is not trusted. (1 rejection(s))
+    -> The NPS does not trust the issuer of the certificate presented by the client (PEAP-TLS/EAP-TLS). On the NPS,
+       install the root and issuing CA of the client certificate in "Trusted Root Certification Authorities" ...
+```
+
+Reason code 265 is raised **by the NPS** because it does not trust the issuer of the client certificate. Fix it on the NPS (Trusted Root/Intermediate store and NTAuth), not on the client. The CAPI2 chain recorded on the NPS at the same time (`CorrelatedTaskID`) shows which certificate of the chain is missing, if CAPI2 logging was enabled there.
+
+Events 6274 ("request discarded") are listed together with 6273. They are often not certificate related (for example unknown RADIUS client or wrong shared secret) and appear as separate non-PKI findings.
 
 #### Scenario 3: Revocation check fails (CRL/OCSP not reachable)
 

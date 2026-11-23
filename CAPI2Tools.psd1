@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.14.2'
+    ModuleVersion        = '2.14.3'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -101,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.14.3
+- NpsRejections now include AccountName, CalledStationID and NasIPv4Address; concrete recommendation for NPS reason code 265
+
 ## Version 2.14.2
 - Documentation: 802.1X section states on which device (client, NPS, CA, any workstation) each command has to be run
 

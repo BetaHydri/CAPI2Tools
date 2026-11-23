@@ -3485,6 +3485,11 @@ $Script:Dot1xGuidance['SEC_E_UNTRUSTED_ROOT'] = $Script:Dot1xGuidance['CERT_E_UN
 $Script:Dot1xGuidance['SEC_E_CERT_EXPIRED'] = $Script:Dot1xGuidance['CERT_E_EXPIRED']
 $Script:Dot1xGuidance['SEC_E_WRONG_PRINCIPAL'] = $Script:Dot1xGuidance['CERT_E_CN_NO_MATCH']
 
+# NPS reason codes with a verified meaning and a concrete next step
+$Script:Dot1xReasonGuidance = @{
+    265 = 'The NPS does not trust the issuer of the certificate presented by the client (PEAP-TLS/EAP-TLS). On the NPS, install the root and issuing CA of the client certificate in "Trusted Root Certification Authorities"/"Intermediate Certification Authorities" (LocalMachine) and make sure the issuing CA is in NTAuth (certutil -viewstore -enterprise NTAuth). The CAPI2 chain on the NPS shows exactly which certificate is missing.'
+}
+
 function Get-Dot1xWinEvent {
     <#
     .SYNOPSIS
@@ -3614,8 +3619,11 @@ function Convert-Dot1xRejection {
         TimeCreated        = $Event.TimeCreated
         EventID            = $Event.Id
         UserName           = $UserName
+        AccountName        = $Data['SubjectUserName']
         CallingStationID   = $Data['CallingStationID']
+        CalledStationID    = $Data['CalledStationID']
         ClientName         = $Data['ClientName']
+        NasIPv4Address     = $Data['NASIPv4Address']
         NasIdentifier      = $Data['NASIdentifier']
         NetworkPolicy      = $Data['NetworkPolicyName']
         AuthenticationType = $Data['AuthenticationType']
@@ -3746,7 +3754,7 @@ function ConvertTo-Dot1xHtmlReport {
 
     if ($Diagnosis.Role -eq 'Nps') {
         [void]$Page.AppendLine('<h2>NPS rejections (Security 6273/6274)</h2>')
-        [void]$Page.AppendLine((& $Table $Diagnosis.NpsRejections @('TimeCreated', 'UserName', 'CallingStationID', 'ClientName', 'EapType', 'ReasonCode', 'Reason', 'CertificateRelated', 'CorrelatedErrors')))
+        [void]$Page.AppendLine((& $Table $Diagnosis.NpsRejections @('TimeCreated', 'UserName', 'AccountName', 'CallingStationID', 'ClientName', 'NasIPv4Address', 'EapType', 'ReasonCode', 'Reason', 'CertificateRelated', 'CorrelatedErrors')))
     }
     else {
         [void]$Page.AppendLine('<h2>Client 802.1X events (Wired/WLAN AutoConfig, EapHost)</h2>')
@@ -3949,7 +3957,12 @@ function Get-CapiDot1xDiagnosis {
             $First = $Group.Group | Select-Object -First 1
             $CorrelatedNames = ($Group.Group | ForEach-Object { $_.CorrelatedErrors } | Where-Object { $_ } | Select-Object -Unique) -join ', '
             if ($First.CertificateRelated) {
-                $Recommendation = 'Certificate related rejection.'
+                $Recommendation = if ($Script:Dot1xReasonGuidance.ContainsKey([int]$First.ReasonCode)) {
+                    $Script:Dot1xReasonGuidance[[int]$First.ReasonCode]
+                }
+                else {
+                    'Certificate related rejection.'
+                }
                 if ($CorrelatedNames) {
                     $Recommendation += " Correlated CAPI2 errors: $CorrelatedNames (see the CAPI2 findings)."
                 }
