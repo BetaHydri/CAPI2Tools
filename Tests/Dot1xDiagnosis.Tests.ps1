@@ -31,6 +31,10 @@ Describe 'Get-CapiDot1xDiagnosis' {
 
         Mock -ModuleName CAPI2Tools Get-Service { [PSCustomObject]@{ Status = 'Running' } }
 
+        Mock -ModuleName CAPI2Tools Get-Dot1xNpsAuditStatus {
+            [PSCustomObject]@{ Success = $true; Failure = $true; Setting = 'Success and Failure' }
+        }
+
         Mock -ModuleName CAPI2Tools Get-ChildItem {
             [PSCustomObject]@{
                 Subject             = 'CN=nps01.contoso.com'
@@ -109,6 +113,25 @@ Describe 'Get-CapiDot1xDiagnosis' {
             @($Filtered.NpsRejections).Count | Should -Be 0
             @($Filtered.CapiChains).Count | Should -Be 0
         }
+
+        It 'does not report the audit policy when success and failure are audited' {
+            $Result.Findings | Where-Object { $_.Source -eq 'Audit policy' } | Should -BeNullOrEmpty
+        }
+
+        It 'warns when failures are not audited' {
+            Mock -ModuleName CAPI2Tools Get-Dot1xNpsAuditStatus {
+                [PSCustomObject]@{ Success = $true; Failure = $false; Setting = 'Success' }
+            }
+            $Audit = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Finding = $Audit.Findings | Where-Object { $_.Source -eq 'Audit policy' }
+            $Finding.Severity | Should -Be 'Warning'
+            $Finding.Recommendation | Should -Match '0CCE9243-69AE-11D9-BED3-505054503030'
+        }
+
+        It 'does not check the audit policy for the client role' {
+            Get-CapiDot1xDiagnosis -Role Client -SkipCertificateInventory 6>$null | Out-Null
+            Should -Invoke -ModuleName CAPI2Tools Get-Dot1xNpsAuditStatus -Times 0 -Scope It
+        }
     }
 
     Context 'Client role' {
@@ -149,6 +172,30 @@ Describe 'Get-CapiDot1xDiagnosis' {
             Get-CapiDot1xDiagnosis -Role Nps -ExportPath $TempDir -Format JSON 6>$null | Out-Null
             $File = Get-ChildItem -Path $TempDir -Filter '*.json'
             { Get-Content -Path $File.FullName -Raw | ConvertFrom-Json } | Should -Not -Throw
+        }
+    }
+}
+
+Describe 'ConvertTo-Dot1xAuditStatus' {
+
+    It 'parses English and German settings' {
+        InModuleScope CAPI2Tools {
+            $En = ConvertTo-Dot1xAuditStatus -Setting 'Success and Failure'
+            $En.Success | Should -BeTrue
+            $En.Failure | Should -BeTrue
+            $De = ConvertTo-Dot1xAuditStatus -Setting 'Erfolg und Fehler'
+            $De.Success | Should -BeTrue
+            $De.Failure | Should -BeTrue
+        }
+    }
+
+    It 'detects partial and disabled auditing' {
+        InModuleScope CAPI2Tools {
+            (ConvertTo-Dot1xAuditStatus -Setting 'Failure').Success | Should -BeFalse
+            (ConvertTo-Dot1xAuditStatus -Setting 'Failure').Failure | Should -BeTrue
+            $None = ConvertTo-Dot1xAuditStatus -Setting 'No Auditing'
+            $None.Success | Should -BeFalse
+            $None.Failure | Should -BeFalse
         }
     }
 }

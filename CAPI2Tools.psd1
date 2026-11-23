@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.14.0'
+    ModuleVersion        = '2.14.1'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -101,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.14.1
+- Get-CapiDot1xDiagnosis checks the NPS audit policy (events 6272/6273/6274 require "Network Policy Server" auditing)
+
 ## Version 2.14.0
 - New Get-CapiDot1xDiagnosis: 802.1X (EAP-TLS/PEAP) certificate troubleshooting for NPS servers and clients
 

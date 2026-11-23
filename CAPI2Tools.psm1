@@ -3533,6 +3533,55 @@ function Test-Dot1xCertificateReason {
     return [bool]($Reason -match 'certificate|\bCRL\b|revocation|revoked|trust|chain|expired|\bTLS\b|signature|Zertifikat|Sperrliste|Sperr|vertrauensw|Stammzertifizierung')
 }
 
+function ConvertTo-Dot1xAuditStatus {
+    <#
+    .SYNOPSIS
+        Converts the (localized) inclusion setting of an auditpol subcategory into Success/Failure flags.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Setting
+    )
+
+    # "No Auditing" and "Keine Ueberwachung" contain neither keyword, so both flags stay false
+    [PSCustomObject]@{
+        Success = [bool]($Setting -match 'Success|Erfolg')
+        Failure = [bool]($Setting -match 'Failure|Fehler')
+        Setting = $Setting
+    }
+}
+
+function Get-Dot1xNpsAuditStatus {
+    <#
+    .SYNOPSIS
+        Returns the audit policy state of the "Network Policy Server" subcategory, or $null if it cannot be read.
+
+    .DESCRIPTION
+        Events 6272/6273/6274 are only written when this subcategory audits success and failure.
+        The subcategory is addressed by GUID so that it works on localized systems. Requires elevation.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $Lines = @(& auditpol.exe /get /subcategory:'{0CCE9243-69AE-11D9-BED3-505054503030}' /r 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $Lines.Count -lt 2) {
+            return $null
+        }
+        $Row = $Lines | Select-Object -Skip 1 | ConvertFrom-Csv -Header Machine, Target, Subcategory, Guid, Inclusion, Exclusion | Select-Object -First 1
+        if (-not $Row -or -not $Row.Inclusion) {
+            return $null
+        }
+        return ConvertTo-Dot1xAuditStatus -Setting $Row.Inclusion
+    }
+    catch {
+        Write-Verbose "Could not read the NPS audit policy: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 function Convert-Dot1xRejection {
     <#
     .SYNOPSIS
@@ -3724,7 +3773,8 @@ function Get-CapiDot1xDiagnosis {
         - CAPI2 certificate validation errors (via Get-CapiAllErrors) with 802.1X specific remediation hints
         - NPS server: rejected authentications from the Security log (events 6273/6274) including reason code,
           user, calling station and EAP type. Certificate related rejections are correlated with the CAPI2 error
-          chain that occurred at the same time.
+          chain that occurred at the same time. The audit policy "Network Policy Server" is checked, because
+          these events are only written when it audits success and failure.
         - Client: errors and warnings from the Wired-AutoConfig, WLAN-AutoConfig and EapHost logs, and the state
           of the dot3svc/wlansvc services.
         - Local certificate inventory (Server Authentication certificates on the NPS, Client Authentication
@@ -3918,6 +3968,13 @@ function Get-CapiDot1xDiagnosis {
         $IasService = Get-Service -Name 'IAS' -ErrorAction SilentlyContinue
         if ($IasService -and $IasService.Status -ne 'Running') {
             $Findings.Add((New-Dot1xFinding -Severity Critical -Source 'Service' -Summary "Network Policy Server service (IAS) is $($IasService.Status)." -Recommendation 'Start the service and check the System and NPS logs for the reason it stopped.'))
+        }
+
+        $Audit = Get-Dot1xNpsAuditStatus
+        if ($Audit -and (-not $Audit.Failure -or -not $Audit.Success)) {
+            $Missing = @(if (-not $Audit.Failure) { 'failures' }; if (-not $Audit.Success) { 'successes' }) -join ' and '
+            $AuditSeverity = if ($Audit.Failure) { 'Info' } else { 'Warning' }
+            $Findings.Add((New-Dot1xFinding -Severity $AuditSeverity -Source 'Audit policy' -Summary "The audit subcategory 'Network Policy Server' does not log $Missing (current setting: $($Audit.Setting)). Events 6272/6273/6274 are incomplete or missing." -Recommendation 'Enable it: auditpol /set /subcategory:"{0CCE9243-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable. Make it permanent via GPO (Advanced Audit Policy > Logon/Logoff > Audit Network Policy Server), otherwise a domain GPO overwrites it.'))
         }
     }
 

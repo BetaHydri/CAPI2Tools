@@ -1,6 +1,6 @@
 # CAPI2 Event Log Correlation Toolkit
 
-[![Version](https://img.shields.io/badge/version-2.14.0-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
+[![Version](https://img.shields.io/badge/version-2.14.1-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://github.com/PowerShell/PowerShell)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
@@ -258,6 +258,17 @@ $Diag.NpsRejections | Group-Object ReasonCode | Sort-Object Count -Descending
 # 4. Switch logging off again
 Stop-CAPI2Troubleshooting -DisableLog
 ```
+
+### Prerequisite: NPS auditing
+
+Events 6272/6273/6274 are only written if the audit subcategory **Network Policy Server** audits success and failure. It is on by default on a Windows Server with the NPS role, but hardening baselines or domain GPOs often turn it off. `Get-CapiDot1xDiagnosis -Role Nps` checks this (elevated) and reports a finding if it is missing. To check and enable it manually (the GUID works on every language):
+
+```powershell
+auditpol /get /subcategory:"{0CCE9243-69AE-11D9-BED3-505054503030}"
+auditpol /set /subcategory:"{0CCE9243-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable
+```
+
+Make it permanent via GPO (Advanced Audit Policy Configuration > Logon/Logoff > Audit Network Policy Server), otherwise a domain GPO overwrites the local setting.
 
 What the report contains:
 

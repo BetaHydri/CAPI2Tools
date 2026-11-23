@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.14.1] - 2026-11-23
+
+### Added
+- `Get-CapiDot1xDiagnosis` (NPS role) checks the audit policy of the subcategory "Network Policy Server" (addressed by GUID, works on localized systems). If failures or successes are not audited, events 6272/6273/6274 are missing; the tool reports a finding with the `auditpol` command and the GPO path. Skipped silently if the policy cannot be read (not elevated).
+
+---
+
 ## [2.14.0] - 2026-11-23
 
 ### Added
