@@ -4052,6 +4052,14 @@ function Get-CapiDot1xDiagnosis {
             $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'System log' -Summary "$($SystemEvents.Count) Schannel/NPS error or warning event(s): $TopEvents" -Recommendation 'Schannel events describe TLS and certificate failures of the EAP handshake, NPS events describe policy and service problems. See the SystemEvents property for the full text.' -Count $SystemEvents.Count))
         }
 
+        # NPS event 4400 names the domain controller used for the account lookup
+        $DomainControllers = @(Get-Dot1xWinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'NPS'; Id = 4400; StartTime = $StartTime } -MaxEvents $MaxEvents |
+                ForEach-Object { if ($_.Message -match '([A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+)') { $Matches[1] } } |
+                Sort-Object -Unique)
+        if ($DomainControllers.Count -gt 0) {
+            $Findings.Add((New-Dot1xFinding -Severity Info -Source 'NPS' -Summary "The NPS used domain controller(s): $($DomainControllers -join ', ')" -Recommendation 'Check the System log (Kdcsvc/Kerberos events) and the Security log (4768/4769/4771) of these DCs at the time of a rejection; the certificate-to-account mapping happens there.'))
+        }
+
         # A rejection without a correlated CAPI2 chain needs the coverage question, even if unrelated chains exist
         $CertRejections = @($Rejections | Where-Object { $_.CertificateRelated -and -not $_.CorrelatedTaskID })
         if ($CertRejections.Count -gt 0) {

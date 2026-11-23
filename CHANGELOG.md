@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.15.4] - 2026-11-23
+
+### Added
+- `Get-CapiDot1xDiagnosis` (NPS): finding `NPS` names the domain controller(s) taken from NPS event 4400 ("A LDAP connection with domain controller ... is established") and points to the DC logs for the certificate-to-account mapping. The NPS may use a different DC than the time source
+
+---
+
 ## [2.15.3] - 2026-11-23
 
 ### Fixed

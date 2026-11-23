@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.15.3'
+    ModuleVersion        = '2.15.4'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -101,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.15.4
+- Get-CapiDot1xDiagnosis (NPS) reports the domain controller(s) named in NPS event 4400
+
 ## Version 2.15.3
 - Get-CapiDot1xDiagnosis (NPS): CAPI2 chains that do not coincide with a rejection are reported as one "unrelated" info finding instead of critical findings; the CAPI2 coverage check also runs when only unrelated chains exist
 

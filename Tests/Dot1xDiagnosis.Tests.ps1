@@ -251,6 +251,14 @@ Describe 'Get-CapiDot1xDiagnosis' {
             $Finding.Recommendation | Should -Match 'Schannel'
         }
 
+        It 'names the domain controller used by the NPS (event 4400)' {
+            Mock -ModuleName CAPI2Tools Get-WinEvent {
+                [PSCustomObject]@{ TimeCreated = (Get-Date); ProviderName = 'NPS'; Id = 4400; LevelDisplayName = 'Information'; Message = 'A LDAP connection with domain controller ZUM-DC-2.contoso.com for domain CONTOSO is established.' }
+            } -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'System' -and $FilterHashtable.Id -eq 4400 }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            ($Result.Findings | Where-Object { $_.Source -eq 'NPS' }).Summary | Should -Match 'ZUM-DC-2.contoso.com'
+        }
+
         It 'reports Schannel/NPS events from the System log' {
             Mock -ModuleName CAPI2Tools Get-WinEvent {
                 [PSCustomObject]@{ TimeCreated = (Get-Date); ProviderName = 'Schannel'; Id = 36888; LevelDisplayName = 'Error'; Message = 'A fatal alert was generated.' }
