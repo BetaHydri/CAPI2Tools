@@ -3457,8 +3457,8 @@ $Script:Dot1xGuidance = @{
         Nps    = 'The chain of the client certificate cannot be built on the NPS. Deploy the issuing CA to the NPS Intermediate store, or make sure the AIA URL of the client certificate is reachable by the NPS.'
     }
     'CRYPT_E_REVOCATION_OFFLINE' = @{
-        Client = 'The client cannot reach the CDP/OCSP of the NPS certificate, typically because it sits in a pre-authentication VLAN/ACL. Allow HTTP access to the CDP/OCSP hosts for unauthenticated clients. Verify with: certutil -verify -urlfetch <nps.cer>'
-        Nps    = 'The NPS cannot download the CRL of the client certificate CA, or the cached CRL has expired. Check CDP reachability from the NPS and CRL validity (certutil -URL <client.cer>). Use the NPS CRL registry settings only as a temporary workaround.'
+        Client = 'The client cannot complete the revocation check of the NPS certificate. If the CDP/OCSP is unreachable (typically a pre-authentication VLAN/ACL), allow HTTP access to these hosts for unauthenticated clients. If CAPI2 shows an HTTP 200 followed by CertRejectedRevocationInfo (Action CheckTimeValidity), the server is reachable but the OCSP response/CRL is outside its validity period: check the client clock and the validity (ThisUpdate/NextUpdate) of the responses. Verify with: certutil -verify -urlfetch <nps.cer>'
+        Nps    = 'The NPS cannot complete the revocation check of a certificate in the chain (the client certificate or its own server certificate; the certificate name in the finding shows which). If the CDP/OCSP is unreachable, check reachability from the NPS. If CAPI2 shows an HTTP 200 followed by CertRejectedRevocationInfo (Action CheckTimeValidity), the server is reachable but the OCSP response/CRL is outside its validity period: check the NPS clock (time sync, VM host time sync) and the validity period and caching of the OCSP responder (ThisUpdate/NextUpdate). Verify with: certutil -verify -urlfetch <cert.cer>. Use the NPS CRL registry settings only as a temporary workaround.'
     }
     'CRYPT_E_REVOKED'       = @{
         Client = 'The NPS server certificate has been revoked. Issue and bind a new certificate in the NPS network policy (EAP properties).'
@@ -3967,7 +3967,8 @@ function Get-CapiDot1xDiagnosis {
         }
         $GrantedCount = @(Get-Dot1xWinEvent -FilterHashtable @{ LogName = 'Security'; Id = 6272; StartTime = $StartTime } -MaxEvents $MaxEvents).Count
 
-        foreach ($Rejection in ($Rejections | Where-Object { $_.CertificateRelated })) {
+        # Correlate every rejection: an "internal error" (reason code 1) can be caused by a certificate problem
+        foreach ($Rejection in $Rejections) {
             $Closest = $Chains |
                 Where-Object { [math]::Abs(($_.TimeCreated - $Rejection.TimeCreated).TotalSeconds) -le $CorrelationWindowSeconds } |
                 Sort-Object { [math]::Abs(($_.TimeCreated - $Rejection.TimeCreated).TotalSeconds) } |
@@ -3998,6 +3999,9 @@ function Get-CapiDot1xDiagnosis {
             }
             else {
                 $Recommendation = 'Probably not a PKI problem (credentials, network policy/connection request policy match, authentication method). Check the NPS policies and the account. For "internal error" also check the System event log around the same time (property SystemEvents).'
+                if ($CorrelatedNames) {
+                    $Recommendation = "A CAPI2 validation error occurred at the same time: $CorrelatedNames (see the CAPI2 findings, the certificate may be the NPS's own server certificate). The rejection is probably caused by this certificate problem. If not, check credentials, network policy and the System event log (property SystemEvents)."
+                }
                 $Severity = 'Warning'
             }
             $Findings.Add((New-Dot1xFinding -Severity $Severity -Source 'NPS Security log' -Summary "Reason code $($First.ReasonCode): $($First.Reason) ($($Group.Count) rejection(s))" -Recommendation $Recommendation -Count $Group.Count))

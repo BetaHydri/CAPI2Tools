@@ -165,6 +165,21 @@ Describe 'Get-CapiDot1xDiagnosis' {
             $Result.AffectedClients[0].ReasonCodes | Should -Be '295'
         }
 
+        It 'correlates a non-certificate rejection (internal error) with a CAPI2 error at the same time' {
+            Mock -ModuleName CAPI2Tools Get-WinEvent {
+                $Event = [PSCustomObject]@{ TimeCreated = (Get-Date); Id = 6274 }
+                $Event | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+                    '<Event><EventData><Data Name="SubjectUserName">host/pc123.contoso.com</Data><Data Name="ReasonCode">1</Data><Data Name="Reason">An internal error occurred.</Data></EventData></Event>'
+                }
+                $Event
+            } -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'Security' -and $FilterHashtable.Id -contains 6273 }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Result.NpsRejections[0].CertificateRelated | Should -BeFalse
+            $Result.NpsRejections[0].CorrelatedErrors | Should -Be 'CERT_E_UNTRUSTEDROOT'
+            $Finding = $Result.Findings | Where-Object { $_.Summary -match 'Reason code 1:' }
+            $Finding.Recommendation | Should -Match 'CERT_E_UNTRUSTEDROOT'
+        }
+
         It 'returns a typed object with counts for the short default display' {
             $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
             $Result.PSObject.TypeNames[0] | Should -Be 'CAPI2Tools.Dot1xDiagnosis'

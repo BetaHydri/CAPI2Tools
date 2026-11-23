@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.15.1] - 2026-11-23
+
+### Changed
+- `Get-CapiDot1xDiagnosis` (NPS): all rejections are correlated with CAPI2 errors, not only certificate related ones. An "internal error" (reason code 1) that coincides with a CAPI2 validation error now points to that error instead of "probably not a PKI problem"
+- Guidance for `CRYPT_E_REVOCATION_OFFLINE` explains the case "server reachable (HTTP 200) but the OCSP response/CRL is rejected for time validity (`CertRejectedRevocationInfo`, Action `CheckTimeValidity`)": check clock/time sync and the validity (ThisUpdate/NextUpdate) of the responses; the failing certificate can be the NPS's own server certificate
+
+---
+
 ## [2.15.0] - 2026-11-23
 
 ### Added
