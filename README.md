@@ -1,6 +1,6 @@
 # CAPI2 Event Log Correlation Toolkit
 
-[![Version](https://img.shields.io/badge/version-2.15.4-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
+[![Version](https://img.shields.io/badge/version-2.16.0-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://github.com/PowerShell/PowerShell)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
@@ -306,7 +306,10 @@ What the report contains:
 - **NPS rejections**: events 6273/6274 with user, calling station, EAP type, reason code and reason text. Certificate related rejections carry the correlated CAPI2 error (`CorrelatedErrors`, `CorrelatedTaskID`)
 - **Client events**: errors and warnings from Wired-AutoConfig, WLAN-AutoConfig and EapHost
 - **Affected clients** (`AffectedClients`, NPS): rejections grouped per client with account, MAC address, switch, reason codes and first/last occurrence
-- **System log** (`SystemEvents`, NPS): Schannel and NPS errors/warnings, for example for reason code 1 "internal error". Schannel events describe TLS/certificate failures of the EAP handshake
+- **System log** (`SystemEvents`, NPS): Schannel and NPS errors/warnings, for example for reason code 1 "internal error". Event 4421 (RequireMsgAuth/limitProxyState hardening hint, written at NPS service starts) is reported as information only
+- **Schannel handshakes** (`SchannelEvents`, NPS): TLS handshake events from the System log without the 36867/36868 credential noise. A handshake (36880) with an empty `RemoteCertSubjectName` means the NPS received no client certificate. Needs Schannel logging (`EventLogging` = 7)
+- **Service phases** (`ServicePhases`, NPS): rejections grouped by the periods between NPS service starts (4421). A finding appears if the NPS first answered (6273) and later only discarded requests (6274)
+- **NPS own certificate**: CAPI2 chains of the NPS's own server certificate (for example a revocation check after a service start) are reported separately and are not linked to rejections
 - **CAPI2 coverage**: if a certificate related rejection has no CAPI2 chain, the tool tells you whether the CAPI2 log was empty, started after the rejection, or covered it without an error. In the last case the rejection does not come from CAPI2 chain building (check Schannel and NTAuth). Optional Schannel detail: set `HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\EventLogging` (DWORD) to `7`, reproduce, and set it back
 - **CAPI2 error chains**: the full chains are available for `Get-CapiErrorAnalysis -ShowEventChain`
 - **Local certificates**: Server Authentication certificates on the NPS, Client Authentication certificates on the client, with expiration and private key checks
@@ -401,13 +404,30 @@ How the tool reports it (`Get-CapiDot1xDiagnosis -Role Nps`, **on the NPS server
 
 ```text
 [Critical] NPS Security log: Reason code 265: The certificate chain was issued by an authority that is not trusted. (1 rejection(s))
-    -> The NPS does not trust the issuer of the certificate presented by the client (PEAP-TLS/EAP-TLS). On the NPS,
-       install the root and issuing CA of the client certificate in "Trusted Root Certification Authorities" ...
+    -> Two different causes produce this code. (1) The NPS cannot build or trust the chain of a client certificate it
+       received ... (2) The client sent NO certificate (empty TLS Certificate message) and ended the handshake ...
 ```
 
-Reason code 265 is raised **by the NPS** because it does not trust the issuer of the client certificate. Fix it on the NPS (Trusted Root/Intermediate store and NTAuth), not on the client. The CAPI2 chain recorded on the NPS at the same time (`CorrelatedTaskID`) shows which certificate of the chain is missing, if CAPI2 logging was enabled there.
+Reason code 265 is reported by the NPS, but **it does not prove that the NPS validated a client certificate**. Two causes produce it:
 
-Events 6274 ("request discarded") are listed together with 6273. They are often not certificate related (for example unknown RADIUS client or wrong shared secret) and appear as separate non-PKI findings.
+1. **The NPS cannot build or trust the chain of a client certificate it received.** Fix it on the NPS (Trusted Root/Intermediate store and NTAuth). The CAPI2 chain recorded on the NPS at the same time (`CorrelatedTaskID`) shows which certificate is missing, if CAPI2 logging was enabled there.
+2. **The client sent no certificate at all.** The NPS asks for a client certificate (TLS Certificate Request), the supplicant answers with an empty Certificate message and ends the handshake. Then there is no CAPI2 chain for the client on the NPS, and Schannel event 36880 shows an empty `RemoteCertSubjectName` (the tool reports this as a Schannel finding). A packet capture of the RADIUS/EAP exchange confirms it (the TLS Certificate message in the client flight has `Certificates Length: 0`). Fix it on the **client**: certificate selection and issuer filter in the 802.1X profile, access to the private key, usability of the certificate for TLS client authentication.
+
+Events 6274 ("request discarded") are listed together with 6273. They are often not certificate related (for example unknown RADIUS client, wrong shared secret, or an NPS that stopped processing requests some time after a service start, see `ServicePhases`) and appear as separate non-PKI findings.
+
+#### Reading a packet capture of the exchange
+
+Capture the RADIUS traffic between switch and NPS (for example `pktmon` or Wireshark on the NPS, UDP 1812/1645). The EAP messages are visible, the TLS payload after the handshake is encrypted:
+
+| Wireshark info | Meaning |
+|----------------|---------|
+| `Request, Protected EAP (EAP-PEAP)` | NPS asks the supplicant to start PEAP |
+| `Client Hello` | supplicant starts the TLS handshake |
+| `Server Hello, Certificate, Server Key Exchange, Certificate Request, Server Hello Done` | NPS sends its certificate chain and **requests a client certificate** |
+| `Certificate, Client Key Exchange, Change Cipher Spec, Encrypted Handshake Message` | client flight: open the TLS record and read **Certificates Length** (0 = no client certificate) |
+| `Encrypted Alert` followed by `Failure` | the supplicant ended the exchange, the NPS rejects |
+
+Identical Access-Requests every 3 seconds without a reply from the NPS mean the NPS discarded them (timeout/retransmit of the switch), which shows up as event 6274.
 
 #### Scenario 3: Revocation check fails (CRL/OCSP not reachable)
 

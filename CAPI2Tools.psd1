@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.15.4'
+    ModuleVersion        = '2.16.0'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -101,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.16.0
+- Get-CapiDot1xDiagnosis (NPS): own-certificate chains are not correlated with rejections, reason code 265 explains both causes (including "client sent no certificate"), Schannel handshake events (36880), service phases (6273 vs 6274 between service starts), event 4421 reported as information
+
 ## Version 2.15.4
 - Get-CapiDot1xDiagnosis (NPS) reports the domain controller(s) named in NPS event 4400
 

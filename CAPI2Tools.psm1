@@ -3509,7 +3509,7 @@ $Script:Dot1xGuidance['SEC_E_WRONG_PRINCIPAL'] = $Script:Dot1xGuidance['CERT_E_C
 
 # NPS reason codes with a verified meaning and a concrete next step
 $Script:Dot1xReasonGuidance = @{
-    265 = 'The NPS does not trust the issuer of the certificate presented by the client (PEAP-TLS/EAP-TLS). On the NPS, install the root and issuing CA of the client certificate in "Trusted Root Certification Authorities"/"Intermediate Certification Authorities" (LocalMachine) and make sure the issuing CA is in NTAuth (certutil -viewstore -enterprise NTAuth). The CAPI2 chain on the NPS shows exactly which certificate is missing.'
+    265 = 'Two different causes produce this code. (1) The NPS cannot build or trust the chain of a client certificate it received: install the root and issuing CA in "Trusted Root Certification Authorities"/"Intermediate Certification Authorities" (LocalMachine) and make sure the issuing CA is in NTAuth (certutil -viewstore -enterprise NTAuth); the CAPI2 chain on the NPS shows which certificate is missing. (2) The client sent NO certificate (empty TLS Certificate message) and ended the handshake: then the NPS never validated a client chain. See the Schannel finding (event 36880 with empty RemoteCertSubjectName) and confirm with a packet capture; investigate the supplicant (profile certificate selection and issuer filter, private key access).'
 }
 
 function Get-Dot1xWinEvent {
@@ -3747,6 +3747,86 @@ function Get-Dot1xCapi2Coverage {
 # Default display of the diagnosis object: a short summary instead of dumping every nested table
 Update-TypeData -TypeName 'CAPI2Tools.Dot1xDiagnosis' -DefaultDisplayPropertySet 'ComputerName', 'Role', 'StartTime', 'EndTime', 'RejectionCount', 'ChainCount', 'FindingCount' -Force
 
+function Convert-Dot1xSchannelEvent {
+    <#
+    .SYNOPSIS
+        Converts a Schannel System log event into a flat object, including the certificate names of TLS handshake events (36880).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Event
+    )
+
+    $Values = @{}
+    try {
+        $Xml = [xml]$Event.ToXml()
+        foreach ($Tag in 'Type', 'Protocol', 'LocalCertSubjectName', 'RemoteCertSubjectName') {
+            $Node = $Xml.GetElementsByTagName($Tag) | Select-Object -First 1
+            if ($Node) {
+                $Values[$Tag] = [string]$Node.InnerText
+            }
+        }
+    }
+    catch {
+        Write-Verbose "Could not parse Schannel event $($Event.Id): $($_.Exception.Message)"
+    }
+
+    $FirstLine = if ($Event.Message) { ($Event.Message -split "`r?`n")[0] } else { '' }
+    [PSCustomObject]@{
+        TimeCreated          = $Event.TimeCreated
+        EventID              = $Event.Id
+        Level                = $Event.LevelDisplayName
+        Type                 = $Values['Type']
+        Protocol             = $Values['Protocol']
+        LocalCertSubjectName = $Values['LocalCertSubjectName']
+        RemoteCertSubjectName = $Values['RemoteCertSubjectName']
+        Message              = $FirstLine
+    }
+}
+
+function Get-Dot1xServicePhase {
+    <#
+    .SYNOPSIS
+        Splits NPS rejections into the periods between NPS service starts and counts denials (6273) and discarded requests (6274) per period.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime[]]$ServiceStart,
+
+        [Parameter(Mandatory = $false)]
+        $Rejection = @(),
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$EndTime
+    )
+
+    $Starts = @($ServiceStart | Sort-Object)
+    for ($i = 0; $i -lt $Starts.Count; $i++) {
+        $To = if ($i -lt $Starts.Count - 1) { $Starts[$i + 1] } else { $EndTime }
+        $InPhase = @($Rejection | Where-Object { $_.TimeCreated -ge $Starts[$i] -and $_.TimeCreated -lt $To })
+        if ($InPhase.Count -eq 0) {
+            continue
+        }
+
+        $Denied = @($InPhase | Where-Object { $_.EventID -eq 6273 } | Sort-Object -Property TimeCreated)
+        $Discarded = @($InPhase | Where-Object { $_.EventID -eq 6274 } | Sort-Object -Property TimeCreated)
+        $LastDenied = if ($Denied.Count -gt 0) { $Denied[-1].TimeCreated }
+        $FirstDiscarded = if ($Discarded.Count -gt 0) { $Discarded[0].TimeCreated }
+
+        [PSCustomObject]@{
+            ServiceStart       = $Starts[$i]
+            Until              = $To
+            Denied6273         = $Denied.Count
+            Discarded6274      = $Discarded.Count
+            LastDenied         = $LastDenied
+            FirstDiscarded     = $FirstDiscarded
+            RepliesThenSilence = [bool]($Denied.Count -gt 0 -and $Discarded.Count -gt 0 -and $FirstDiscarded -gt $LastDenied)
+        }
+    }
+}
+
 function ConvertTo-Dot1xHtmlReport {
     <#
     .SYNOPSIS
@@ -3802,6 +3882,10 @@ function ConvertTo-Dot1xHtmlReport {
         [void]$Page.AppendLine((& $Table $Diagnosis.NpsRejections @('TimeCreated', 'UserName', 'AccountName', 'CallingStationID', 'ClientName', 'NasIPv4Address', 'EapType', 'ReasonCode', 'Reason', 'CertificateRelated', 'CorrelatedErrors')))
         [void]$Page.AppendLine('<h2>System log (Schannel / NPS errors and warnings)</h2>')
         [void]$Page.AppendLine((& $Table $Diagnosis.SystemEvents @('TimeCreated', 'Provider', 'EventID', 'Level', 'Message')))
+        [void]$Page.AppendLine('<h2>NPS service phases (rejections between service starts)</h2>')
+        [void]$Page.AppendLine((& $Table $Diagnosis.ServicePhases @('ServiceStart', 'Until', 'Denied6273', 'Discarded6274', 'LastDenied', 'FirstDiscarded', 'RepliesThenSilence')))
+        [void]$Page.AppendLine('<h2>Schannel events (TLS handshakes)</h2>')
+        [void]$Page.AppendLine((& $Table $Diagnosis.SchannelEvents @('TimeCreated', 'EventID', 'Level', 'Type', 'Protocol', 'LocalCertSubjectName', 'RemoteCertSubjectName', 'Message')))
     }
     else {
         [void]$Page.AppendLine('<h2>Client 802.1X events (Wired/WLAN AutoConfig, EapHost)</h2>')
@@ -3951,6 +4035,13 @@ function Get-CapiDot1xDiagnosis {
         $Chains = @($Chains | Where-Object { $_.Certificate -like "*$Name*" })
     }
 
+    # Chains of the NPS's own server certificate (validated by Schannel, typically at the first handshake after a service start) say nothing about a client certificate
+    $OwnChains = @()
+    if ($Role -eq 'Nps') {
+        $OwnChains = @($Chains | Where-Object { $_.Certificate -and $_.Certificate -like "*$env:COMPUTERNAME*" })
+    }
+    $ForeignChains = @($Chains | Where-Object { $OwnChains.TaskID -notcontains $_.TaskID })
+
     # NPS evidence
     $Rejections = @()
     $GrantedCount = 0
@@ -3964,7 +4055,7 @@ function Get-CapiDot1xDiagnosis {
 
         # Correlate every rejection: an "internal error" (reason code 1) can be caused by a certificate problem
         foreach ($Rejection in $Rejections) {
-            $Closest = $Chains |
+            $Closest = $ForeignChains |
                 Where-Object { [math]::Abs(($_.TimeCreated - $Rejection.TimeCreated).TotalSeconds) -le $CorrelationWindowSeconds } |
                 Sort-Object { [math]::Abs(($_.TimeCreated - $Rejection.TimeCreated).TotalSeconds) } |
                 Select-Object -First 1
@@ -4018,6 +4109,8 @@ function Get-CapiDot1xDiagnosis {
     # NPS: affected clients, System log (Schannel/NPS) and CAPI2 coverage
     $AffectedClients = @()
     $SystemEvents = @()
+    $SchannelEvents = @()
+    $ServicePhases = @()
     if ($Role -eq 'Nps') {
         $AffectedClients = @($Rejections |
                 Group-Object -Property { '{0}|{1}' -f $_.AccountName, $_.CallingStationID } |
@@ -4046,10 +4139,41 @@ function Get-CapiDot1xDiagnosis {
                         Message     = $FirstLine
                     }
                 })
-        if ($SystemEvents.Count -gt 0) {
-            $TopEvents = ($SystemEvents | Group-Object -Property Provider, EventID | Sort-Object -Property Count -Descending | Select-Object -First 3 |
+        # Event 4421 (RequireMsgAuth/limitProxyState hardening hint) is written when the NPS service starts; it is no error source
+        $ServiceStartEvents = @($SystemEvents | Where-Object { $_.Provider -eq 'NPS' -and $_.EventID -eq 4421 })
+        $OtherSystemEvents = @($SystemEvents | Where-Object { -not ($_.Provider -eq 'NPS' -and $_.EventID -eq 4421) })
+        if ($OtherSystemEvents.Count -gt 0) {
+            $TopEvents = ($OtherSystemEvents | Group-Object -Property Provider, EventID | Sort-Object -Property Count -Descending | Select-Object -First 3 |
                     ForEach-Object { "$($_.Name) x$($_.Count)" }) -join '; '
-            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'System log' -Summary "$($SystemEvents.Count) Schannel/NPS error or warning event(s): $TopEvents" -Recommendation 'Schannel events describe TLS and certificate failures of the EAP handshake, NPS events describe policy and service problems. See the SystemEvents property for the full text.' -Count $SystemEvents.Count))
+            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'System log' -Summary "$($OtherSystemEvents.Count) Schannel/NPS error or warning event(s): $TopEvents" -Recommendation 'Schannel events describe TLS and certificate failures of the EAP handshake, NPS events describe policy and service problems. See the SystemEvents property for the full text.' -Count $OtherSystemEvents.Count))
+        }
+        if ($ServiceStartEvents.Count -gt 0) {
+            $Findings.Add((New-Dot1xFinding -Severity Info -Source 'NPS service' -Summary "NPS event 4421 was logged $($ServiceStartEvents.Count) time(s), latest at $(($ServiceStartEvents | Sort-Object -Property TimeCreated | Select-Object -Last 1).TimeCreated). In the observed cases it coincided with NPS service starts." -Recommendation 'The event warns that RequireMsgAuth/limitProxyState (RADIUS Message-Authenticator hardening, see the Microsoft link in the event) is in Disable mode. It is a hardening hint, not the cause of rejections. Enable the enforcement only after verifying that all RADIUS clients send Message-Authenticator (EAP always does, MAB/PAP may not).' -Count $ServiceStartEvents.Count))
+
+            $ServicePhases = @(Get-Dot1xServicePhase -ServiceStart @($ServiceStartEvents | ForEach-Object { $_.TimeCreated }) -Rejection $Rejections -EndTime $EndTime)
+            $SilentPhases = @($ServicePhases | Where-Object { $_.RepliesThenSilence })
+            if ($SilentPhases.Count -gt 0) {
+                $Example = $SilentPhases | Select-Object -First 1
+                $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'NPS service phases' -Summary "In $($SilentPhases.Count) period(s) after an NPS service start the NPS first answered (6273) and later only discarded requests (6274). Example: start $($Example.ServiceStart), last 6273 at $($Example.LastDenied), first 6274 at $($Example.FirstDiscarded)." -Recommendation 'Discarded requests get no reply, so the switch retries (timeout/retransmit) and finally gives up. Check the System log of the NPS and of the domain controller it uses (NPS event 4400 names it) for errors in that period, `show aaa servers` and `show radius statistics` on the switch, and whether the NPS service was restarted manually or by itself. See the ServicePhases property.' -Count $SilentPhases.Count))
+            }
+        }
+
+        # Schannel events (needs EventLogging in HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL); the 36867/36868 credential noise is skipped
+        $SchannelEvents = @(Get-Dot1xWinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Schannel'; StartTime = $StartTime } -MaxEvents $MaxEvents |
+                Where-Object { $_.Id -notin 36867, 36868 } |
+                ForEach-Object { Convert-Dot1xSchannelEvent -Event $_ })
+        $CertRelatedRejections = @($Rejections | Where-Object { $_.CertificateRelated })
+        $Handshakes = @($SchannelEvents | Where-Object { $_.EventID -eq 36880 })
+        if ($CertRelatedRejections.Count -gt 0) {
+            if ($Handshakes.Count -gt 0) {
+                $WithoutClientCertificate = @($Handshakes | Where-Object { -not $_.RemoteCertSubjectName })
+                if ($WithoutClientCertificate.Count -gt 0) {
+                    $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'Schannel' -Summary "$($WithoutClientCertificate.Count) of $($Handshakes.Count) TLS server handshake(s) completed without a client certificate (event 36880, RemoteCertSubjectName empty)." -Recommendation 'The NPS received no client certificate. A certificate related rejection such as reason code 265 after such a handshake is then not a validation of a client chain on the NPS. Investigate the supplicant: certificate selection and issuer filter in the 802.1X profile, access to the private key, usability of the certificate for TLS client authentication. A packet capture of the RADIUS/EAP exchange confirms it (the TLS Certificate message in the client flight has length 0).' -Count $WithoutClientCertificate.Count))
+                }
+            }
+            else {
+                $Findings.Add((New-Dot1xFinding -Severity Info -Source 'Schannel' -Summary 'No Schannel handshake events (36880) found for the rejections.' -Recommendation 'Enable Schannel logging temporarily to see whether a client certificate arrives: reg add HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL /v EventLogging /t REG_DWORD /d 7 /f, reproduce, then reg delete ... /v EventLogging /f.'))
+            }
         }
 
         # NPS event 4400 names the domain controller used for the account lookup
@@ -4078,12 +4202,17 @@ function Get-CapiDot1xDiagnosis {
     }
 
     # CAPI2 findings: on an NPS with rejections only chains that coincide with a rejection count, the rest is background noise
-    $FindingChains = @($Chains)
+    $FindingChains = @($ForeignChains)
     $BackgroundChains = @()
     if ($Role -eq 'Nps' -and @($Rejections).Count -gt 0) {
         $CorrelatedIds = @($Rejections | Where-Object { $_.CorrelatedTaskID } | ForEach-Object { $_.CorrelatedTaskID })
-        $FindingChains = @($Chains | Where-Object { $CorrelatedIds -contains $_.TaskID })
-        $BackgroundChains = @($Chains | Where-Object { $CorrelatedIds -notcontains $_.TaskID })
+        $FindingChains = @($ForeignChains | Where-Object { $CorrelatedIds -contains $_.TaskID })
+        $BackgroundChains = @($ForeignChains | Where-Object { $CorrelatedIds -notcontains $_.TaskID })
+    }
+
+    if ($OwnChains.Count -gt 0) {
+        $OwnErrors = ($OwnChains | ForEach-Object { $_.Errors -split ',\s*' } | Where-Object { $_ } | Select-Object -Unique) -join ', '
+        $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'CAPI2 (NPS certificate)' -Summary "$($OwnChains.Count) CAPI2 error chain(s) concern the NPS's own server certificate ($OwnErrors)." -Recommendation 'These are validations of the NPS server certificate itself, typically at the first handshake after a service start. A revocation problem here (for example an OCSP response rejected for time validity, event 42 CheckTimeValidity) is a PKI finding, but it is no evidence about the client certificate and did not prevent the TLS handshake in the observed case. Verify with: certutil -verify -urlfetch <nps.cer>.' -Count $OwnChains.Count))
     }
 
     $ErrorGroups = @{}
@@ -4198,6 +4327,8 @@ function Get-CapiDot1xDiagnosis {
         NpsRejections     = $Rejections
         NpsAccessGranted  = $GrantedCount
         SystemEvents      = $SystemEvents
+        SchannelEvents    = $SchannelEvents
+        ServicePhases     = $ServicePhases
         ClientEvents      = $ClientEvents
         CapiChains        = $Chains
         LocalCertificates = $LocalCerts

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.16.0] - 2026-11-23
+
+### Fixed
+- `Get-CapiDot1xDiagnosis` (NPS): a CAPI2 chain of the **NPS's own server certificate** (for example `CRYPT_E_REVOCATION_OFFLINE` at the first handshake after a service start) was linked to rejections by time and produced misleading findings ("NPS does not trust the issuer of the certificate presented by the client"). Such chains are now recognized by the computer name, reported separately (`CAPI2 (NPS certificate)`) and no longer correlated with rejections
+- Reason code 265 guidance claimed the NPS had validated a client certificate. It now names both causes: the NPS cannot trust a received client chain, or the client sent no certificate at all (empty TLS Certificate message)
+- NPS event 4421 (RequireMsgAuth/limitProxyState hardening hint) no longer counts as a Schannel/NPS warning; it is an information finding
+
+### Added
+- `SchannelEvents`: Schannel System log events without the 36867/36868 noise. Finding `Schannel` when a TLS handshake (36880) completed without a client certificate (`RemoteCertSubjectName` empty) for certificate related rejections, or a hint to enable Schannel logging when no handshake events exist
+- `ServicePhases`: rejections grouped by the periods between NPS service starts (4421). Finding `NPS service phases` when the NPS first answered (6273) and later only discarded requests (6274)
+- HTML report: service phases and Schannel events
+- README: reading a packet capture of the PEAP exchange (empty client Certificate message), two causes of reason code 265
+
+---
+
 ## [2.15.4] - 2026-11-23
 
 ### Added

@@ -251,6 +251,79 @@ Describe 'Get-CapiDot1xDiagnosis' {
             $Finding.Recommendation | Should -Match 'Schannel'
         }
 
+        It 'does not correlate chains of the NPS own certificate with rejections' {
+            Mock -ModuleName CAPI2Tools Get-CapiAllErrors {
+                [PSCustomObject]@{
+                    TimeCreated = (Get-Date).AddSeconds(-5)
+                    TaskID      = 'A1B2C3D4-0000-4000-8000-000000000001'
+                    Certificate = "$env:COMPUTERNAME.contoso.com"
+                    ErrorCount  = 1
+                    Errors      = 'CRYPT_E_REVOCATION_OFFLINE'
+                    Events      = @()
+                }
+            }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Result.NpsRejections[0].CorrelatedTaskID | Should -BeNullOrEmpty
+            ($Result.Findings | Where-Object { $_.Source -eq 'CAPI2 (NPS certificate)' }).Summary | Should -Match 'own server certificate'
+            $Result.Findings | Where-Object { $_.Source -eq 'CAPI2' } | Should -BeNullOrEmpty
+        }
+
+        It 'explains both causes of reason code 265' {
+            Mock -ModuleName CAPI2Tools Get-WinEvent {
+                $Event = [PSCustomObject]@{ TimeCreated = (Get-Date); Id = 6273 }
+                $Event | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+                    '<Event><EventData><Data Name="SubjectUserName">host/pc123.contoso.com</Data><Data Name="ReasonCode">265</Data><Data Name="Reason">The certificate chain was issued by an authority that is not trusted.</Data></EventData></Event>'
+                }
+                $Event
+            } -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'Security' -and $FilterHashtable.Id -contains 6273 }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            ($Result.Findings | Where-Object { $_.Summary -match 'Reason code 265' }).Recommendation | Should -Match 'sent NO certificate'
+        }
+
+        It 'reports event 4421 as information and detects replies followed by silence after a service start' {
+            Mock -ModuleName CAPI2Tools Get-WinEvent {
+                [PSCustomObject]@{ TimeCreated = (Get-Date).AddMinutes(-55); ProviderName = 'NPS'; Id = 4421; LevelDisplayName = 'Warning'; Message = 'RequireMsgAuth and/or limitProxyState configuration is in Disable mode.' }
+            } -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'System' -and $FilterHashtable.Level }
+            Mock -ModuleName CAPI2Tools Get-WinEvent {
+                $Denied = [PSCustomObject]@{ TimeCreated = (Get-Date).AddMinutes(-50); Id = 6273 }
+                $Denied | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+                    '<Event><EventData><Data Name="SubjectUserName">host/pc123.contoso.com</Data><Data Name="ReasonCode">265</Data><Data Name="Reason">The certificate chain was issued by an authority that is not trusted.</Data></EventData></Event>'
+                }
+                $Discarded = [PSCustomObject]@{ TimeCreated = (Get-Date).AddMinutes(-20); Id = 6274 }
+                $Discarded | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+                    '<Event><EventData><Data Name="SubjectUserName">host/pc123.contoso.com</Data><Data Name="ReasonCode">1</Data><Data Name="Reason">An internal error occurred.</Data></EventData></Event>'
+                }
+                $Denied
+                $Discarded
+            } -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'Security' -and $FilterHashtable.Id -contains 6273 }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Result.Findings | Where-Object { $_.Source -eq 'System log' } | Should -BeNullOrEmpty
+            ($Result.Findings | Where-Object { $_.Source -eq 'NPS service' }).Severity | Should -Be 'Info'
+            @($Result.ServicePhases).Count | Should -Be 1
+            $Result.ServicePhases[0].RepliesThenSilence | Should -BeTrue
+            ($Result.Findings | Where-Object { $_.Source -eq 'NPS service phases' }).Severity | Should -Be 'Warning'
+        }
+
+        It 'reports a TLS handshake without client certificate (Schannel 36880)' {
+            Mock -ModuleName CAPI2Tools Get-WinEvent {
+                $Event = [PSCustomObject]@{ TimeCreated = (Get-Date); Id = 36880; LevelDisplayName = 'Information'; Message = 'A TLS server handshake completed successfully.' }
+                $Event | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+                    '<Event><UserData><EventXML><Type>server</Type><Protocol>TLS 1.2</Protocol><LocalCertSubjectName>CN=nps01</LocalCertSubjectName><RemoteCertSubjectName></RemoteCertSubjectName></EventXML></UserData></Event>'
+                }
+                $Event
+            } -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'System' -and $FilterHashtable.ProviderName -eq 'Schannel' -and -not $FilterHashtable.Level }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Finding = $Result.Findings | Where-Object { $_.Source -eq 'Schannel' }
+            $Finding.Severity | Should -Be 'Warning'
+            $Finding.Summary | Should -Match 'without a client certificate'
+            @($Result.SchannelEvents).Count | Should -Be 1
+        }
+
+        It 'suggests Schannel logging when no handshake events exist for certificate related rejections' {
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            ($Result.Findings | Where-Object { $_.Source -eq 'Schannel' }).Summary | Should -Match 'No Schannel handshake events'
+        }
+
         It 'names the domain controller used by the NPS (event 4400)' {
             Mock -ModuleName CAPI2Tools Get-WinEvent {
                 [PSCustomObject]@{ TimeCreated = (Get-Date); ProviderName = 'NPS'; Id = 4400; LevelDisplayName = 'Information'; Message = 'A LDAP connection with domain controller ZUM-DC-2.contoso.com for domain CONTOSO is established.' }
@@ -318,6 +391,54 @@ Describe 'Convert-Dot1xRejection (real-world 6273, anonymized)' {
     It 'has a concrete recommendation for reason code 265' {
         InModuleScope CAPI2Tools {
             $Script:Dot1xReasonGuidance[265] | Should -Match 'NTAuth'
+        }
+    }
+}
+
+Describe 'Get-Dot1xServicePhase' {
+
+    It 'counts denials and discarded requests per period between service starts' {
+        InModuleScope CAPI2Tools {
+            $Start = [datetime]'2026-11-23T10:00:00'
+            $Rejections = @(
+                [PSCustomObject]@{ TimeCreated = $Start.AddMinutes(1); EventID = 6273 }
+                [PSCustomObject]@{ TimeCreated = $Start.AddMinutes(11); EventID = 6273 }
+                [PSCustomObject]@{ TimeCreated = $Start.AddMinutes(41); EventID = 6274 }
+                [PSCustomObject]@{ TimeCreated = $Start.AddMinutes(75); EventID = 6273 }
+            )
+            $Phases = @(Get-Dot1xServicePhase -ServiceStart @($Start, $Start.AddMinutes(60)) -Rejection $Rejections -EndTime $Start.AddMinutes(120))
+            $Phases.Count | Should -Be 2
+            $Phases[0].Denied6273 | Should -Be 2
+            $Phases[0].Discarded6274 | Should -Be 1
+            $Phases[0].RepliesThenSilence | Should -BeTrue
+            $Phases[1].Denied6273 | Should -Be 1
+            $Phases[1].RepliesThenSilence | Should -BeFalse
+        }
+    }
+
+    It 'skips periods without rejections' {
+        InModuleScope CAPI2Tools {
+            $Start = [datetime]'2026-11-23T10:00:00'
+            @(Get-Dot1xServicePhase -ServiceStart @($Start) -Rejection @() -EndTime $Start.AddHours(1)).Count | Should -Be 0
+        }
+    }
+}
+
+Describe 'Convert-Dot1xSchannelEvent' {
+
+    It 'reads the certificate names of a 36880 event and tolerates events without XML' {
+        InModuleScope CAPI2Tools {
+            $Event = [PSCustomObject]@{ TimeCreated = Get-Date; Id = 36880; LevelDisplayName = 'Information'; Message = "Handshake ok.`r`nDetails" }
+            $Event | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+                '<Event><UserData><EventXML><Type>server</Type><LocalCertSubjectName>CN=nps01</LocalCertSubjectName><RemoteCertSubjectName></RemoteCertSubjectName></EventXML></UserData></Event>'
+            }
+            $Row = Convert-Dot1xSchannelEvent -Event $Event
+            $Row.LocalCertSubjectName | Should -Be 'CN=nps01'
+            $Row.RemoteCertSubjectName | Should -BeNullOrEmpty
+            $Row.Message | Should -Be 'Handshake ok.'
+
+            $Plain = [PSCustomObject]@{ TimeCreated = Get-Date; Id = 36888; LevelDisplayName = 'Error'; Message = 'Fatal alert' }
+            (Convert-Dot1xSchannelEvent -Event $Plain).EventID | Should -Be 36888
         }
     }
 }
