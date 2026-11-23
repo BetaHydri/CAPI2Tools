@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.14.2] - 2026-11-23
+
+### Documentation
+- 802.1X / NPS section: new "Where to run which command" table (client, NPS server, device that receives the fix, any workstation) and an ordered workflow with the target device for every step
+- Each 802.1X scenario states on which device it must be run
+- Notes on time synchronization and on how `-Name` filters differ between client and NPS
+
+---
+
 ## [2.14.1] - 2026-11-23
 
 ### Added

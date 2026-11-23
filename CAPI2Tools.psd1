@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.14.1'
+    ModuleVersion        = '2.14.2'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -101,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.14.2
+- Documentation: 802.1X section states on which device (client, NPS, CA, any workstation) each command has to be run
+
 ## Version 2.14.1
 - Get-CapiDot1xDiagnosis checks the NPS audit policy (events 6272/6273/6274 require "Network Policy Server" auditing)
 

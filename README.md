@@ -1,6 +1,6 @@
 # CAPI2 Event Log Correlation Toolkit
 
-[![Version](https://img.shields.io/badge/version-2.14.1-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
+[![Version](https://img.shields.io/badge/version-2.14.2-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://github.com/PowerShell/PowerShell)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
@@ -235,33 +235,63 @@ Certificate validation happens on **both sides** of an 802.1X authentication, so
 | **Client** (supplicant) | Certificate of the NPS server (EAP-TLS and PEAP) | `CERT_E_UNTRUSTEDROOT`, `CRYPT_E_REVOCATION_OFFLINE`, `CERT_E_CN_NO_MATCH`, `CERT_E_WRONG_USAGE` |
 | **NPS server** | Certificate of the client (EAP-TLS only) | `CERT_E_UNTRUSTEDROOT` (root or NTAuth), `CRYPT_E_REVOCATION_OFFLINE` (CRL of the client CA), `CERT_E_EXPIRED` |
 
-`Get-CapiDot1xDiagnosis` collects the evidence for the machine it runs on. Run it as administrator right after reproducing the failure (reading the Security log requires elevation).
+`Get-CapiDot1xDiagnosis` collects the evidence **only for the machine it runs on**. It never connects to other devices, so run it separately on the client and on the NPS server, each in an **elevated** PowerShell (the Security log and the CAPI2 log require administrator rights).
+
+### Where to run which command
+
+| Device | Command | Purpose | When |
+|--------|---------|---------|------|
+| **Client** (and **NPS**) | `Import-Module CAPI2Tools` | Load the module. It must be installed on every device you collect evidence from. | Once per device |
+| **Client** and **NPS** | `Start-CAPI2Troubleshooting -ClearLog` | Enable CAPI2 logging and start with an empty log. Enable it on the device(s) where the validation you want to see takes place. | **Before** reproducing the failure |
+| **NPS server** | `auditpol /get ...` and `/set ...` | Make sure events 6272/6273/6274 are written (see [Prerequisite](#prerequisite-nps-auditing)). | Once, before the first analysis |
+| **Client** | Reconnect: disable/enable the adapter or reconnect to the WLAN | Trigger the 802.1X authentication again. | After `Start-CAPI2Troubleshooting` on client and NPS |
+| **Client** | `Get-CapiDot1xDiagnosis -Role Client` | Does the client trust the **NPS certificate**? Client supplicant events and Client Authentication certificates. | Right after the failed attempt |
+| **NPS server** | `Get-CapiDot1xDiagnosis -Role Nps` | Does the NPS trust the **client certificate**? Rejections (6273/6274), correlation with CAPI2 errors, audit policy, Server Authentication certificates. | Right after the failed attempt |
+| **NPS server** | `Get-CapiAllErrors -Hours 24 -GroupByError` | Overview when many clients fail at once. | Any time, no reproduction needed |
+| **Client** or **NPS** | `certutil -verify -urlfetch <cert.cer>` | Test the revocation path (CDP/OCSP/AIA) from the viewpoint of that device. Run it on the device that fails the validation. | After a revocation finding |
+| **NPS server** (or any domain-joined machine) | `certutil -viewstore -enterprise NTAuth` | Check that the issuing CA of the client certificates is in NTAuth. | After an untrusted root finding on the NPS |
+| **Device that receives the fix** | `gpupdate /force`, `certutil -pulse` | Apply the GPO/auto-enrollment fix, for example root CA on the client or new NPS certificate on the NPS. | After the fix |
+| **Client** and **NPS** | `Stop-CAPI2Troubleshooting -DisableLog` | Disable CAPI2 logging again. | When the analysis is finished |
+| **Any workstation** | Open the exported HTML/JSON report | Reports are plain files. Copy them from the devices to review them in one place. | Any time |
+
+Switches and access points (RADIUS clients) are not analyzed by this tool. If neither side shows a certificate error or a rejection, check the RADIUS client configuration there.
+
+### Typical workflow in order
 
 ```powershell
-# 1. Enable CAPI2 logging (client and NPS), then reproduce the failed authentication
+# --- 1. On the CLIENT and on the NPS server (elevated): start logging ---
+Import-Module CAPI2Tools
 Start-CAPI2Troubleshooting -ClearLog
 
-# 2a. NPS server: rejected authentications + CAPI2 errors + certificate check, as HTML report
+# --- 2. On the CLIENT: reproduce the failure (reconnect the adapter or the WLAN) ---
+
+# --- 3a. On the NPS server (elevated): rejections + CAPI2 errors + certificate check ---
 Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
 
-# 2b. NPS server: only one client (user name, host name or MAC address)
+# --- 3b. On the NPS server: only one client (user name, host name or MAC address) ---
 Get-CapiDot1xDiagnosis -Role Nps -Hours 4 -Name '*pc123*'
 
-# 2c. Client: Wired/WLAN AutoConfig + EapHost events + CAPI2 errors for the NPS certificate
-Get-CapiDot1xDiagnosis -Role Client -Hours 1
+# --- 3c. On the CLIENT (elevated): Wired/WLAN AutoConfig + EapHost events + CAPI2 errors for the NPS certificate ---
+Get-CapiDot1xDiagnosis -Role Client -Hours 1 -ExportPath C:\Reports
 
-# 3. Work with the result objects
+# --- 4. On either device: work with the result objects ---
 $Diag = Get-CapiDot1xDiagnosis -Role Nps -Hours 24
 $Diag.Findings | Format-List Severity, Summary, Recommendation
 $Diag.NpsRejections | Group-Object ReasonCode | Sort-Object Count -Descending
 
-# 4. Switch logging off again
+# --- 5. On the CLIENT and on the NPS server: stop logging ---
 Stop-CAPI2Troubleshooting -DisableLog
 ```
 
+Tips:
+
+- Keep the clocks of client and NPS in sync (NTP). The evidence of both devices is compared by timestamp.
+- `-Name` filters differently per device: on the **NPS** it matches the user name or calling station ID of the rejection (client host name or MAC address), on the **client** it matches the certificate name in the CAPI2 chains (for example the NPS FQDN).
+- On a productive NPS use `Start-CAPI2Troubleshooting` without `-ClearLog` if you do not want to delete existing CAPI2 events, and keep `-Hours` small.
+
 ### Prerequisite: NPS auditing
 
-Events 6272/6273/6274 are only written if the audit subcategory **Network Policy Server** audits success and failure. It is on by default on a Windows Server with the NPS role, but hardening baselines or domain GPOs often turn it off. `Get-CapiDot1xDiagnosis -Role Nps` checks this (elevated) and reports a finding if it is missing. To check and enable it manually (the GUID works on every language):
+**Run on: the NPS server (elevated).** Events 6272/6273/6274 are only written if the audit subcategory **Network Policy Server** audits success and failure. It is on by default on a Windows Server with the NPS role, but hardening baselines or domain GPOs often turn it off. `Get-CapiDot1xDiagnosis -Role Nps` checks this (elevated) and reports a finding if it is missing. To check and enable it manually (the GUID works on every language):
 
 ```powershell
 auditpol /get /subcategory:"{0CCE9243-69AE-11D9-BED3-505054503030}"
@@ -288,13 +318,13 @@ Notes:
 
 ### 802.1X Scenarios and Examples
 
-The console output shown below is illustrative; names, counts and wording depend on your environment.
+The console output shown below is illustrative; names, counts and wording depend on your environment. Each scenario states **on which device** the commands must be run.
 
 #### Scenario 1: Client does not trust the NPS certificate (PEAP / EAP-TLS)
 
 Symptom: the client keeps asking for credentials or fails with "cannot connect to this network"; the NPS shows no Security event because the client aborts the TLS handshake.
 
-On the **client** (elevated):
+**Run on: the affected client (elevated).** The NPS is not needed for this analysis.
 
 ```powershell
 Start-CAPI2Troubleshooting -ClearLog
@@ -315,7 +345,7 @@ Fix: deploy the root CA via GPO, select it in the EAP profile, then repeat the t
 
 Symptom: clients are denied, Security event 6273 appears on the NPS with a certificate related reason.
 
-On the **NPS server** (elevated):
+**Run on: the NPS server (elevated).** First enable CAPI2 logging on the NPS (`Start-CAPI2Troubleshooting`), then let the client authenticate again.
 
 ```powershell
 Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
@@ -333,7 +363,7 @@ NPS rejected: 2, granted: 41
        issuing CA is missing in NTAuth (certutil -viewstore -enterprise NTAuth) ...
 ```
 
-Inspect the rejection details and the full CAPI2 chain behind them:
+Inspect the rejection details and the full CAPI2 chain behind them (**on the NPS server**, same session):
 
 ```powershell
 $Diag = Get-CapiDot1xDiagnosis -Role Nps -Hours 1
@@ -345,18 +375,23 @@ $Diag.CapiChains[0].Events | Get-CapiErrorAnalysis -ShowEventChain
 
 Symptom: authentication worked yesterday and fails today for everybody, or only in the pre-authentication VLAN.
 
+**Run on: the device that fails the validation.** Check the NPS if the NPS rejects the client (NPS cannot fetch the CRL of the client CA), check the client if the client rejects the NPS certificate (client cannot reach the CDP of the NPS certificate, for example in the pre-authentication VLAN). If you do not know which side fails, run it on both.
+
 ```powershell
-# NPS or client
+# On the NPS or on the client (same command, role is detected automatically)
 $Diag = Get-CapiDot1xDiagnosis -Hours 4
 $Diag.Findings | Where-Object Summary -match 'REVOCATION' | Format-List Severity, Summary, Recommendation
 
-# Verify the revocation path independently
+# On the same device: verify the revocation path independently
+# (certificate to test: the NPS certificate on the client, a client certificate on the NPS)
 certutil -verify -urlfetch .\nps01.cer
 ```
 
 `CRYPT_E_REVOCATION_OFFLINE` on the **client** points to a CDP/OCSP host that the unauthenticated client cannot reach. On the **NPS** it points to a CRL of the client CA that cannot be downloaded or has expired (check `certutil -URL`).
 
 #### Scenario 4: Many clients fail at once (for example after a CRL expiry)
+
+**Run on: the NPS server (elevated).** The NPS sees the rejections of all clients; no reproduction on a client is needed. CAPI2 logging must already be enabled on the NPS.
 
 ```powershell
 # Which error dominates? Group the CAPI2 errors of the last day
@@ -374,15 +409,19 @@ One error type affecting many clients indicates an infrastructure problem (CRL, 
 
 #### Scenario 5: Verify a fix (before/after)
 
+**Run on: the same device before and after the fix** (the NPS in this example), using the same `-Hours` and `-Name`. Apply the fix on the device it belongs to: root CA or EAP profile on the client (GPO), NPS certificate and NTAuth/Trusted Root on the NPS, CRL publishing on the CA.
+
 ```powershell
+# On the NPS server
 $Before = Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
 
-# Apply the fix, for example publish the CRL or deploy the root CA
+# Apply the fix, for example publish the CRL on the CA or deploy the root CA via GPO.
+# Then update the policy on the device that receives the fix (client or NPS):
 gpupdate /force
 certutil -pulse
-# Repeat the authentication
+# On the client: repeat the authentication
 
-$After = Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
+$After = Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports   # on the NPS server again
 "Rejections before: $(@($Before.NpsRejections).Count), after: $(@($After.NpsRejections).Count)"
 ```
 
