@@ -275,6 +275,115 @@ Notes:
 - Check the revocation path independently with `certutil -verify -urlfetch <cert.cer>` and the NTAuth store with `certutil -viewstore -enterprise NTAuth`.
 - See [Examples/Dot1x-Troubleshooting.ps1](Examples/Dot1x-Troubleshooting.ps1) for a guided run.
 
+### 802.1X Scenarios and Examples
+
+The console output shown below is illustrative; names, counts and wording depend on your environment.
+
+#### Scenario 1: Client does not trust the NPS certificate (PEAP / EAP-TLS)
+
+Symptom: the client keeps asking for credentials or fails with "cannot connect to this network"; the NPS shows no Security event because the client aborts the TLS handshake.
+
+On the **client** (elevated):
+
+```powershell
+Start-CAPI2Troubleshooting -ClearLog
+# Reconnect: disable/enable the adapter or reconnect to the WLAN
+Get-CapiDot1xDiagnosis -Role Client -Hours 1 -ExportPath C:\Reports
+```
+
+```text
+=== Findings ===
+[Critical] CAPI2: CERT_E_UNTRUSTEDROOT in 1 validation chain(s). Certificates: nps01.contoso.com
+    -> The root CA of the NPS server certificate is not trusted by the client. Deploy the root CA to
+       "Trusted Root Certification Authorities" (GPO) and select it in the EAP/PEAP profile ...
+```
+
+Fix: deploy the root CA via GPO, select it in the EAP profile, then repeat the test and compare (see Scenario 5).
+
+#### Scenario 2: NPS rejects the client certificate (EAP-TLS)
+
+Symptom: clients are denied, Security event 6273 appears on the NPS with a certificate related reason.
+
+On the **NPS server** (elevated):
+
+```powershell
+Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
+```
+
+```text
+CAPI2 error chains: 2
+NPS rejected: 2, granted: 41
+
+=== Findings ===
+[Critical] NPS Security log: Reason code 295: A certificate chain processed, but terminated in a root certificate which is not trusted (2 rejection(s))
+    -> Certificate related rejection. Correlated CAPI2 errors: CERT_E_UNTRUSTEDROOT (see the CAPI2 findings).
+[Critical] CAPI2: CERT_E_UNTRUSTEDROOT in 2 validation chain(s). Certificates: pc123.contoso.com
+    -> The root CA of the client certificate is missing in the NPS Trusted Root store (LocalMachine\Root), or the
+       issuing CA is missing in NTAuth (certutil -viewstore -enterprise NTAuth) ...
+```
+
+Inspect the rejection details and the full CAPI2 chain behind them:
+
+```powershell
+$Diag = Get-CapiDot1xDiagnosis -Role Nps -Hours 1
+$Diag.NpsRejections | Format-Table TimeCreated, UserName, CallingStationID, ReasonCode, CorrelatedErrors
+$Diag.CapiChains[0].Events | Get-CapiErrorAnalysis -ShowEventChain
+```
+
+#### Scenario 3: Revocation check fails (CRL/OCSP not reachable)
+
+Symptom: authentication worked yesterday and fails today for everybody, or only in the pre-authentication VLAN.
+
+```powershell
+# NPS or client
+$Diag = Get-CapiDot1xDiagnosis -Hours 4
+$Diag.Findings | Where-Object Summary -match 'REVOCATION' | Format-List Severity, Summary, Recommendation
+
+# Verify the revocation path independently
+certutil -verify -urlfetch .\nps01.cer
+```
+
+`CRYPT_E_REVOCATION_OFFLINE` on the **client** points to a CDP/OCSP host that the unauthenticated client cannot reach. On the **NPS** it points to a CRL of the client CA that cannot be downloaded or has expired (check `certutil -URL`).
+
+#### Scenario 4: Many clients fail at once (for example after a CRL expiry)
+
+```powershell
+# Which error dominates? Group the CAPI2 errors of the last day
+Get-CapiAllErrors -Hours 24 -GroupByError
+
+# Which reason codes does the NPS report?
+$Diag = Get-CapiDot1xDiagnosis -Role Nps -Hours 24
+$Diag.NpsRejections | Group-Object ReasonCode, Reason | Sort-Object Count -Descending | Format-Table Count, Name -AutoSize
+
+# Which clients are affected?
+$Diag.NpsRejections | Select-Object -ExpandProperty CallingStationID -Unique
+```
+
+One error type affecting many clients indicates an infrastructure problem (CRL, root/NTAuth, NPS certificate) rather than a single client.
+
+#### Scenario 5: Verify a fix (before/after)
+
+```powershell
+$Before = Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
+
+# Apply the fix, for example publish the CRL or deploy the root CA
+gpupdate /force
+certutil -pulse
+# Repeat the authentication
+
+$After = Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
+"Rejections before: $(@($Before.NpsRejections).Count), after: $(@($After.NpsRejections).Count)"
+```
+
+If you want the event-level view of one validation chain (when both runs contain a chain), use `Compare-CapiEvents`:
+
+```powershell
+Compare-CapiEvents -ReferenceEvents $Before.CapiChains[0].Events -DifferenceEvents $After.CapiChains[0].Events `
+    -ReferenceLabel 'Before fix' -DifferenceLabel 'After fix'
+```
+
+Note: if neither the client nor the NPS shows certificate errors or rejections while the authentication still fails, the request probably never reached the NPS or fails for non-PKI reasons (switch/RADIUS client configuration, shared secret, network policy). Check the NPS Security log and the RADIUS client settings first.
+
 ---
 
 ## 💻 Requirements
