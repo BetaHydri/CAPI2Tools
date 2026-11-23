@@ -3704,6 +3704,27 @@ function Get-Dot1xCertificateInventory {
     }
 }
 
+function Get-Dot1xCapi2Coverage {
+    <#
+    .SYNOPSIS
+        Returns the time range covered by the CAPI2 Operational log (oldest/newest event).
+    #>
+    [CmdletBinding()]
+    param()
+
+    $LogName = 'Microsoft-Windows-CAPI2/Operational'
+    $Oldest = Get-WinEvent -LogName $LogName -Oldest -MaxEvents 1 -ErrorAction SilentlyContinue
+    $Newest = Get-WinEvent -LogName $LogName -MaxEvents 1 -ErrorAction SilentlyContinue
+
+    [PSCustomObject]@{
+        Oldest = if ($Oldest) { $Oldest.TimeCreated } else { $null }
+        Newest = if ($Newest) { $Newest.TimeCreated } else { $null }
+    }
+}
+
+# Default display of the diagnosis object: a short summary instead of dumping every nested table
+Update-TypeData -TypeName 'CAPI2Tools.Dot1xDiagnosis' -DefaultDisplayPropertySet 'ComputerName', 'Role', 'StartTime', 'EndTime', 'RejectionCount', 'ChainCount', 'FindingCount' -Force
+
 function ConvertTo-Dot1xHtmlReport {
     <#
     .SYNOPSIS
@@ -3753,8 +3774,12 @@ function ConvertTo-Dot1xHtmlReport {
     [void]$Page.AppendLine((& $Table $Diagnosis.Findings @('Severity', 'Source', 'Count', 'Summary', 'Recommendation')))
 
     if ($Diagnosis.Role -eq 'Nps') {
+        [void]$Page.AppendLine('<h2>Affected clients</h2>')
+        [void]$Page.AppendLine((& $Table $Diagnosis.AffectedClients @('AccountName', 'CallingStationID', 'ClientName', 'NasIPv4Address', 'Rejections', 'ReasonCodes', 'FirstSeen', 'LastSeen')))
         [void]$Page.AppendLine('<h2>NPS rejections (Security 6273/6274)</h2>')
         [void]$Page.AppendLine((& $Table $Diagnosis.NpsRejections @('TimeCreated', 'UserName', 'AccountName', 'CallingStationID', 'ClientName', 'NasIPv4Address', 'EapType', 'ReasonCode', 'Reason', 'CertificateRelated', 'CorrelatedErrors')))
+        [void]$Page.AppendLine('<h2>System log (Schannel / NPS errors and warnings)</h2>')
+        [void]$Page.AppendLine((& $Table $Diagnosis.SystemEvents @('TimeCreated', 'Provider', 'EventID', 'Level', 'Message')))
     }
     else {
         [void]$Page.AppendLine('<h2>Client 802.1X events (Wired/WLAN AutoConfig, EapHost)</h2>')
@@ -3972,7 +3997,7 @@ function Get-CapiDot1xDiagnosis {
                 $Severity = 'Critical'
             }
             else {
-                $Recommendation = 'Probably not a PKI problem (credentials, network policy/connection request policy match, authentication method). Check the NPS policies and the account.'
+                $Recommendation = 'Probably not a PKI problem (credentials, network policy/connection request policy match, authentication method). Check the NPS policies and the account. For "internal error" also check the System event log around the same time (property SystemEvents).'
                 $Severity = 'Warning'
             }
             $Findings.Add((New-Dot1xFinding -Severity $Severity -Source 'NPS Security log' -Summary "Reason code $($First.ReasonCode): $($First.Reason) ($($Group.Count) rejection(s))" -Recommendation $Recommendation -Count $Group.Count))
@@ -3988,6 +4013,60 @@ function Get-CapiDot1xDiagnosis {
             $Missing = @(if (-not $Audit.Failure) { 'failures' }; if (-not $Audit.Success) { 'successes' }) -join ' and '
             $AuditSeverity = if ($Audit.Failure) { 'Info' } else { 'Warning' }
             $Findings.Add((New-Dot1xFinding -Severity $AuditSeverity -Source 'Audit policy' -Summary "The audit subcategory 'Network Policy Server' does not log $Missing (current setting: $($Audit.Setting)). Events 6272/6273/6274 are incomplete or missing." -Recommendation 'Enable it: auditpol /set /subcategory:"{0CCE9243-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable. Make it permanent via GPO (Advanced Audit Policy > Logon/Logoff > Audit Network Policy Server), otherwise a domain GPO overwrites it.'))
+        }
+    }
+
+    # NPS: affected clients, System log (Schannel/NPS) and CAPI2 coverage
+    $AffectedClients = @()
+    $SystemEvents = @()
+    if ($Role -eq 'Nps') {
+        $AffectedClients = @($Rejections |
+                Group-Object -Property { '{0}|{1}' -f $_.AccountName, $_.CallingStationID } |
+                ForEach-Object {
+                    $Sorted = @($_.Group | Sort-Object -Property TimeCreated)
+                    [PSCustomObject]@{
+                        AccountName      = $Sorted[0].AccountName
+                        CallingStationID = $Sorted[0].CallingStationID
+                        ClientName       = $Sorted[0].ClientName
+                        NasIPv4Address   = $Sorted[0].NasIPv4Address
+                        Rejections       = $_.Count
+                        ReasonCodes      = (($_.Group.ReasonCode | Sort-Object -Unique) -join ', ')
+                        FirstSeen        = $Sorted[0].TimeCreated
+                        LastSeen         = $Sorted[-1].TimeCreated
+                    }
+                } | Sort-Object -Property Rejections -Descending)
+
+        $SystemEvents = @(Get-Dot1xWinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Schannel', 'NPS'; StartTime = $StartTime; Level = 1, 2, 3 } -MaxEvents $MaxEvents |
+                ForEach-Object {
+                    $FirstLine = if ($_.Message) { ($_.Message -split "`r?`n")[0] } else { '' }
+                    [PSCustomObject]@{
+                        TimeCreated = $_.TimeCreated
+                        Provider    = $_.ProviderName
+                        EventID     = $_.Id
+                        Level       = $_.LevelDisplayName
+                        Message     = $FirstLine
+                    }
+                })
+        if ($SystemEvents.Count -gt 0) {
+            $TopEvents = ($SystemEvents | Group-Object -Property Provider, EventID | Sort-Object -Property Count -Descending | Select-Object -First 3 |
+                    ForEach-Object { "$($_.Name) x$($_.Count)" }) -join '; '
+            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'System log' -Summary "$($SystemEvents.Count) Schannel/NPS error or warning event(s): $TopEvents" -Recommendation 'Schannel events describe TLS and certificate failures of the EAP handshake, NPS events describe policy and service problems. See the SystemEvents property for the full text.' -Count $SystemEvents.Count))
+        }
+
+        # Without a CAPI2 chain it matters whether the log covers the time of the rejection at all
+        $CertRejections = @($Rejections | Where-Object { $_.CertificateRelated })
+        if ($CertRejections.Count -gt 0 -and $Chains.Count -eq 0) {
+            $Coverage = Get-Dot1xCapi2Coverage
+            $FirstRejection = ($CertRejections | Sort-Object -Property TimeCreated | Select-Object -First 1).TimeCreated
+            if (-not $Coverage -or -not $Coverage.Oldest) {
+                $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'CAPI2 log' -Summary 'The CAPI2 log contains no events, so the cause of the certificate rejection cannot be shown.' -Recommendation 'Run Start-CAPI2Troubleshooting on the NPS, let the client authenticate again, then run this command again.'))
+            }
+            elseif ($Coverage.Oldest -gt $FirstRejection) {
+                $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'CAPI2 log' -Summary "The CAPI2 log starts at $($Coverage.Oldest), after the first certificate related rejection at $FirstRejection." -Recommendation 'Let the client authenticate again now (adapter off/on or wait for the next retry) and run this command again.'))
+            }
+            else {
+                $Findings.Add((New-Dot1xFinding -Severity Info -Source 'CAPI2 log' -Summary 'The CAPI2 log covers the time of the rejection but recorded no validation error.' -Recommendation 'The rejection is probably not caused by CAPI2 chain building. Check the SystemEvents (Schannel) and the NTAuth store (certutil -viewstore -enterprise NTAuth). For more Schannel detail set HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\EventLogging (DWORD) to 7, reproduce, and set it back.'))
+            }
         }
     }
 
@@ -4058,13 +4137,19 @@ function Get-CapiDot1xDiagnosis {
     $SortedFindings = @($Findings | Sort-Object { $SeverityOrder[$_.Severity] }, @{ Expression = 'Count'; Descending = $true })
 
     $Diagnosis = [PSCustomObject]@{
+        PSTypeName        = 'CAPI2Tools.Dot1xDiagnosis'
         ComputerName      = $env:COMPUTERNAME
         Role              = $Role
         StartTime         = $StartTime
         EndTime           = $EndTime
+        RejectionCount    = @($Rejections).Count
+        ChainCount        = @($Chains).Count
+        FindingCount      = $SortedFindings.Count
         Findings          = $SortedFindings
+        AffectedClients   = $AffectedClients
         NpsRejections     = $Rejections
         NpsAccessGranted  = $GrantedCount
+        SystemEvents      = $SystemEvents
         ClientEvents      = $ClientEvents
         CapiChains        = $Chains
         LocalCertificates = $LocalCerts
@@ -4075,6 +4160,10 @@ function Get-CapiDot1xDiagnosis {
     Write-Host "CAPI2 error chains: $($Chains.Count)" -ForegroundColor White
     if ($Role -eq 'Nps') {
         Write-Host "NPS rejected: $($Rejections.Count), granted: $GrantedCount" -ForegroundColor White
+        if ($AffectedClients.Count -gt 0) {
+            Write-Host "`nAffected clients:" -ForegroundColor White
+            $AffectedClients | Format-Table -Property AccountName, CallingStationID, ClientName, NasIPv4Address, Rejections, ReasonCodes, LastSeen -AutoSize | Out-String | Write-Host
+        }
     }
     else {
         Write-Host "Client error/warning events: $($ClientEvents.Count)" -ForegroundColor White

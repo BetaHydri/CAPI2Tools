@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.14.3'
+    ModuleVersion        = '2.15.0'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -101,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.15.0
+- Get-CapiDot1xDiagnosis: affected clients summary, System log (Schannel/NPS) events, CAPI2 coverage check, short default display
+
 ## Version 2.14.3
 - NpsRejections now include AccountName, CalledStationID and NasIPv4Address; concrete recommendation for NPS reason code 265
 

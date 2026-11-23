@@ -35,6 +35,10 @@ Describe 'Get-CapiDot1xDiagnosis' {
             [PSCustomObject]@{ Success = $true; Failure = $true; Setting = 'Success and Failure' }
         }
 
+        Mock -ModuleName CAPI2Tools Get-Dot1xCapi2Coverage {
+            [PSCustomObject]@{ Oldest = (Get-Date).AddHours(-5); Newest = (Get-Date) }
+        }
+
         Mock -ModuleName CAPI2Tools Get-ChildItem {
             [PSCustomObject]@{
                 Subject             = 'CN=nps01.contoso.com'
@@ -148,6 +152,60 @@ Describe 'Get-CapiDot1xDiagnosis' {
         It 'collects client authentication events' {
             @($Result.ClientEvents).Count | Should -BeGreaterThan 0
             $Result.ClientEvents[0].Message | Should -Be 'Wired 802.1X authentication failed.'
+        }
+    }
+
+    Context 'NPS summary and diagnostics' {
+
+        It 'summarizes rejections per client' {
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            @($Result.AffectedClients).Count | Should -Be 1
+            $Result.AffectedClients[0].AccountName | Should -Be 'host/pc123.contoso.com'
+            $Result.AffectedClients[0].Rejections | Should -Be 1
+            $Result.AffectedClients[0].ReasonCodes | Should -Be '295'
+        }
+
+        It 'returns a typed object with counts for the short default display' {
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Result.PSObject.TypeNames[0] | Should -Be 'CAPI2Tools.Dot1xDiagnosis'
+            $Result.RejectionCount | Should -Be 1
+            $Result.ChainCount | Should -Be 1
+            $Result.FindingCount | Should -Be @($Result.Findings).Count
+        }
+
+        It 'warns when the CAPI2 log started after the rejection' {
+            Mock -ModuleName CAPI2Tools Get-CapiAllErrors { }
+            Mock -ModuleName CAPI2Tools Get-Dot1xCapi2Coverage {
+                [PSCustomObject]@{ Oldest = (Get-Date).AddMinutes(10); Newest = (Get-Date).AddMinutes(11) }
+            }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Finding = $Result.Findings | Where-Object { $_.Source -eq 'CAPI2 log' }
+            $Finding.Severity | Should -Be 'Warning'
+            $Finding.Summary | Should -Match 'starts at'
+        }
+
+        It 'warns when the CAPI2 log is empty' {
+            Mock -ModuleName CAPI2Tools Get-CapiAllErrors { }
+            Mock -ModuleName CAPI2Tools Get-Dot1xCapi2Coverage { [PSCustomObject]@{ Oldest = $null; Newest = $null } }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            ($Result.Findings | Where-Object { $_.Source -eq 'CAPI2 log' }).Summary | Should -Match 'no events'
+        }
+
+        It 'points to Schannel and NTAuth when CAPI2 covered the time but has no error' {
+            Mock -ModuleName CAPI2Tools Get-CapiAllErrors { }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Finding = $Result.Findings | Where-Object { $_.Source -eq 'CAPI2 log' }
+            $Finding.Severity | Should -Be 'Info'
+            $Finding.Recommendation | Should -Match 'Schannel'
+        }
+
+        It 'reports Schannel/NPS events from the System log' {
+            Mock -ModuleName CAPI2Tools Get-WinEvent {
+                [PSCustomObject]@{ TimeCreated = (Get-Date); ProviderName = 'Schannel'; Id = 36888; LevelDisplayName = 'Error'; Message = 'A fatal alert was generated.' }
+            } -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'System' }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            @($Result.SystemEvents).Count | Should -Be 1
+            ($Result.Findings | Where-Object { $_.Source -eq 'System log' }).Summary | Should -Match 'Schannel'
         }
     }
 

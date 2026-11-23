@@ -1,6 +1,6 @@
 # CAPI2 Event Log Correlation Toolkit
 
-[![Version](https://img.shields.io/badge/version-2.14.3-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
+[![Version](https://img.shields.io/badge/version-2.15.0-blue.svg)](https://github.com/BetaHydri/CAPI2Tools)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://github.com/PowerShell/PowerShell)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
@@ -305,11 +305,15 @@ What the report contains:
 - **Findings**: sorted by severity, each with a recommendation that is specific to the role (NPS or client)
 - **NPS rejections**: events 6273/6274 with user, calling station, EAP type, reason code and reason text. Certificate related rejections carry the correlated CAPI2 error (`CorrelatedErrors`, `CorrelatedTaskID`)
 - **Client events**: errors and warnings from Wired-AutoConfig, WLAN-AutoConfig and EapHost
+- **Affected clients** (`AffectedClients`, NPS): rejections grouped per client with account, MAC address, switch, reason codes and first/last occurrence
+- **System log** (`SystemEvents`, NPS): Schannel and NPS errors/warnings, for example for reason code 1 "internal error". Schannel events describe TLS/certificate failures of the EAP handshake
+- **CAPI2 coverage**: if a certificate related rejection has no CAPI2 chain, the tool tells you whether the CAPI2 log was empty, started after the rejection, or covered it without an error. In the last case the rejection does not come from CAPI2 chain building (check Schannel and NTAuth). Optional Schannel detail: set `HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\EventLogging` (DWORD) to `7`, reproduce, and set it back
 - **CAPI2 error chains**: the full chains are available for `Get-CapiErrorAnalysis -ShowEventChain`
 - **Local certificates**: Server Authentication certificates on the NPS, Client Authentication certificates on the client, with expiration and private key checks
 
 Notes:
 
+- The result object prints only a short summary (computer, role, window, counts). Assign it (`$d = Get-CapiDot1xDiagnosis ...`) and use `$d.Findings`, `$d.AffectedClients`, `$d.NpsRejections`, `$d.SystemEvents`, `$d.CapiChains`, `$d.LocalCertificates`.
 - The role is detected automatically (`IAS` service present means NPS). Use `-Role` to override it.
 - A rejection is treated as certificate related by a heuristic: reason codes of 256 and higher, or certificate/CRL/trust keywords in the reason text (English and German).
 - Rejections caused by policies or credentials (for example reason codes 16, 48, 49, 66) are reported as non-PKI findings.
@@ -514,6 +518,13 @@ Import-Module .\CAPI2Tools.psm1 -Force
 # Import module directly without installation
 Import-Module "C:\Path\To\CAPI2Tools.psm1"
 ```
+
+### Installation pitfalls
+
+- **Do not use the browser's "Save page as" on a file view on GitHub.** That saves the HTML page, not the file. Importing it fails with *"The module manifest ... could not be processed because it is not a valid Windows PowerShell restricted language file"* and error lines containing `<script type="importmap">`. Download the release ZIP (**Code > Download ZIP**), use `git clone`, or the raw URL (`https://raw.githubusercontent.com/BetaHydri/CAPI2Tools/master/CAPI2Tools.psd1`).
+- Check a file: `Get-Content .\CAPI2Tools.psd1 -TotalCount 3` must start with `@{`, the `.psm1` with a `<#` comment block.
+- Files from the internet: `Get-ChildItem <ModuleFolder> -Recurse | Unblock-File`.
+- This error is not related to the PowerShell language mode (Constrained Language Mode). Check the mode with `$ExecutionContext.SessionState.LanguageMode`. If it is `ConstrainedLanguage`, the module has to be signed/allowed in the WDAC or AppLocker policy; there is no GPO setting that switches the mode off.
 
 ### Persistent Import (Add to PowerShell Profile)
 

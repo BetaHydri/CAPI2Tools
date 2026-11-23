@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.15.0] - 2026-11-23
+
+### Added
+- `Get-CapiDot1xDiagnosis` (NPS): `AffectedClients` groups rejections per client (account, MAC, switch, reason codes, first/last seen) and prints them in the console summary
+- `Get-CapiDot1xDiagnosis` (NPS): `SystemEvents` collects Schannel and NPS errors/warnings from the System log, with a finding (reason code 1 "internal error" points to the System log)
+- `Get-CapiDot1xDiagnosis` (NPS): CAPI2 coverage check when a certificate related rejection has no CAPI2 chain: log empty, log started after the rejection, or log covers the rejection without error (then check Schannel/NTAuth)
+- HTML report contains the affected clients and the System log events
+
+### Changed
+- The diagnosis object has the type `CAPI2Tools.Dot1xDiagnosis` and prints a short summary (computer, role, window, counts) instead of dumping all nested tables. All properties remain available
+
+### Documentation
+- README: installation pitfalls (saving the GitHub page instead of the file, `Unblock-File`, language mode), Schannel logging hint
+
+---
+
 ## [2.14.3] - 2026-11-23
 
 ### Added
