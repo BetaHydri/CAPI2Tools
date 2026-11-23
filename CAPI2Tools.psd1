@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.13.0'
+    ModuleVersion        = '2.14.0'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -65,7 +65,10 @@ Features:
         
         # Workflow Helpers
         'Start-CAPI2Troubleshooting',
-        'Stop-CAPI2Troubleshooting'
+        'Stop-CAPI2Troubleshooting',
+        
+        # 802.1X / NPS Diagnostics
+        'Get-CapiDot1xDiagnosis'
     )
     
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
@@ -98,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.14.0
+- New Get-CapiDot1xDiagnosis: 802.1X (EAP-TLS/PEAP) certificate troubleshooting for NPS servers and clients
+
 ## Version 2.12.0 (December 2025)
 
 ### New Features

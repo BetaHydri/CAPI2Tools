@@ -15,6 +15,7 @@ A powerful PowerShell toolkit for analyzing Windows CAPI2 (Cryptographic API) ev
 - [Overview](#-overview)
 - [Features](#-features)
 - [Command Reference](#-command-reference)
+- [802.1X / NPS Troubleshooting](#-8021x--nps-troubleshooting)
 - [Requirements](#-requirements)
 - [Installation](#-installation)
 - [Usage & Troubleshooting Workflows](#-usage--troubleshooting-workflows)
@@ -78,6 +79,12 @@ Same certificate validated 3 times:
 
 Using **chainRef** would mix all 9 events together with duplicate sequence numbers.  
 Using **TaskId** gives you 3 separate chains with correct sequences (1,2,3 for each).
+
+### What's New in v2.14.0
+
+- 🔐 **802.1X / NPS Diagnosis**: New `Get-CapiDot1xDiagnosis` combines CAPI2 validation errors, NPS rejections (Security 6273/6274), client supplicant logs and the local certificate inventory in one report
+- 🔗 **Correlation**: Certificate related NPS rejections are matched with the CAPI2 error chain that happened at the same time
+- 🧭 **Role aware guidance**: Remediation hints differ for the NPS (client certificate validation) and the client (NPS certificate validation)
 
 ### What's New in v2.13.0
 
@@ -152,12 +159,13 @@ Using **TaskId** gives you 3 separate chains with correct sequences (1,2,3 for e
 
 ## 📖 Command Reference
 
-The CAPI2Tools module provides 13 functions and 6 convenient aliases for certificate validation analysis and troubleshooting.
+The CAPI2Tools module provides 14 functions and 6 convenient aliases for certificate validation analysis and troubleshooting.
 
 ### Functions
 
 | Command | Purpose |
 |---------|---------|
+| **`Get-CapiDot1xDiagnosis`** | **🔐 NEW v2.14.0** - 802.1X (EAP-TLS/PEAP) certificate troubleshooting for NPS servers and clients: CAPI2 errors, NPS rejections, client supplicant events and certificate inventory in one report. |
 | **`Get-CapiCertificateReport`** | **⭐ RECOMMENDED** - Simplified one-command solution: search, analyze, and export certificate errors in a single step. Perfect for quick diagnostics! |
 | **`Get-CapiAllErrors`** | **🔍 NEW v2.12.0** - Scan entire CAPI2 log for ALL errors, correlate with full event chains, and bulk export to HTML reports. Perfect for comprehensive error discovery! |
 | **`Find-CapiEventsByName`** | Search CAPI2 events by DNS name, certificate subject, or issuer. Returns complete correlation chains for matching certificates. |
@@ -215,6 +223,57 @@ Find-CertEvents -Name "example.com" | Get-CapiErrorAnalysis
 $Events = Find-CertEvents -Name "example.com"
 Export-CapiEvents -Events $Events[0].Events -Path "C:\Reports" -Format HTML -IncludeErrorAnalysis -TaskID $Events[0].TaskID
 ```
+
+---
+
+## 🔐 802.1X / NPS Troubleshooting
+
+Certificate validation happens on **both sides** of an 802.1X authentication, so collect evidence on both:
+
+| Side | Validates | Typical CAPI2 errors |
+|------|-----------|----------------------|
+| **Client** (supplicant) | Certificate of the NPS server (EAP-TLS and PEAP) | `CERT_E_UNTRUSTEDROOT`, `CRYPT_E_REVOCATION_OFFLINE`, `CERT_E_CN_NO_MATCH`, `CERT_E_WRONG_USAGE` |
+| **NPS server** | Certificate of the client (EAP-TLS only) | `CERT_E_UNTRUSTEDROOT` (root or NTAuth), `CRYPT_E_REVOCATION_OFFLINE` (CRL of the client CA), `CERT_E_EXPIRED` |
+
+`Get-CapiDot1xDiagnosis` collects the evidence for the machine it runs on. Run it as administrator right after reproducing the failure (reading the Security log requires elevation).
+
+```powershell
+# 1. Enable CAPI2 logging (client and NPS), then reproduce the failed authentication
+Start-CAPI2Troubleshooting -ClearLog
+
+# 2a. NPS server: rejected authentications + CAPI2 errors + certificate check, as HTML report
+Get-CapiDot1xDiagnosis -Role Nps -Hours 1 -ExportPath C:\Reports
+
+# 2b. NPS server: only one client (user name, host name or MAC address)
+Get-CapiDot1xDiagnosis -Role Nps -Hours 4 -Name '*pc123*'
+
+# 2c. Client: Wired/WLAN AutoConfig + EapHost events + CAPI2 errors for the NPS certificate
+Get-CapiDot1xDiagnosis -Role Client -Hours 1
+
+# 3. Work with the result objects
+$Diag = Get-CapiDot1xDiagnosis -Role Nps -Hours 24
+$Diag.Findings | Format-List Severity, Summary, Recommendation
+$Diag.NpsRejections | Group-Object ReasonCode | Sort-Object Count -Descending
+
+# 4. Switch logging off again
+Stop-CAPI2Troubleshooting -DisableLog
+```
+
+What the report contains:
+
+- **Findings**: sorted by severity, each with a recommendation that is specific to the role (NPS or client)
+- **NPS rejections**: events 6273/6274 with user, calling station, EAP type, reason code and reason text. Certificate related rejections carry the correlated CAPI2 error (`CorrelatedErrors`, `CorrelatedTaskID`)
+- **Client events**: errors and warnings from Wired-AutoConfig, WLAN-AutoConfig and EapHost
+- **CAPI2 error chains**: the full chains are available for `Get-CapiErrorAnalysis -ShowEventChain`
+- **Local certificates**: Server Authentication certificates on the NPS, Client Authentication certificates on the client, with expiration and private key checks
+
+Notes:
+
+- The role is detected automatically (`IAS` service present means NPS). Use `-Role` to override it.
+- A rejection is treated as certificate related by a heuristic: reason codes of 256 and higher, or certificate/CRL/trust keywords in the reason text (English and German).
+- Rejections caused by policies or credentials (for example reason codes 16, 48, 49, 66) are reported as non-PKI findings.
+- Check the revocation path independently with `certutil -verify -urlfetch <cert.cer>` and the NTAuth store with `certutil -viewstore -enterprise NTAuth`.
+- See [Examples/Dot1x-Troubleshooting.ps1](Examples/Dot1x-Troubleshooting.ps1) for a guided run.
 
 ---
 

@@ -3444,6 +3444,603 @@ function Get-CapiAllErrors {
 
 #endregion
 
+#region 802.1X / NPS Diagnostics
+
+# 802.1X specific remediation hints per CAPI2 error, separated by the side that performs the validation
+$Script:Dot1xGuidance = @{
+    'CERT_E_UNTRUSTEDROOT'  = @{
+        Client = 'The root CA of the NPS server certificate is not trusted by the client. Deploy the root CA to "Trusted Root Certification Authorities" (GPO) and select it in the EAP/PEAP profile under "Trusted Root Certification Authorities".'
+        Nps    = 'The root CA of the client certificate is missing in the NPS Trusted Root store (LocalMachine\Root), or the issuing CA is missing in NTAuth (certutil -viewstore -enterprise NTAuth). Publish the CA certificates via Active Directory/GPO.'
+    }
+    'CERT_E_CHAINING'       = @{
+        Client = 'The chain to the NPS certificate cannot be built. Deploy the issuing CA to "Intermediate Certification Authorities" via GPO, or make sure the AIA URL of the NPS certificate is reachable by the client.'
+        Nps    = 'The chain of the client certificate cannot be built on the NPS. Deploy the issuing CA to the NPS Intermediate store, or make sure the AIA URL of the client certificate is reachable by the NPS.'
+    }
+    'CRYPT_E_REVOCATION_OFFLINE' = @{
+        Client = 'The client cannot reach the CDP/OCSP of the NPS certificate, typically because it sits in a pre-authentication VLAN/ACL. Allow HTTP access to the CDP/OCSP hosts for unauthenticated clients. Verify with: certutil -verify -urlfetch <nps.cer>'
+        Nps    = 'The NPS cannot download the CRL of the client certificate CA, or the cached CRL has expired. Check CDP reachability from the NPS and CRL validity (certutil -URL <client.cer>). Use the NPS CRL registry settings only as a temporary workaround.'
+    }
+    'CRYPT_E_REVOKED'       = @{
+        Client = 'The NPS server certificate has been revoked. Issue and bind a new certificate in the NPS network policy (EAP properties).'
+        Nps    = 'The client certificate has been revoked. Issue a new certificate for the client or user.'
+    }
+    'CERT_E_EXPIRED'        = @{
+        Client = 'The NPS server certificate has expired. Renew it and select the new certificate in the NPS network policy (EAP properties).'
+        Nps    = 'The client certificate has expired. Enroll a new certificate (check auto-enrollment) and verify the CA chain validity.'
+    }
+    'CERT_E_CN_NO_MATCH'    = @{
+        Client = 'The server name in the NPS certificate does not match "Connect to these servers" in the EAP profile. Correct the profile or reissue the NPS certificate with the right CN/SAN.'
+        Nps    = 'Subject/SAN of the client certificate does not match the expected identity. Verify the UPN/DNS name in the certificate against the account.'
+    }
+    'CERT_E_WRONG_USAGE'    = @{
+        Client = 'The NPS certificate lacks the "Server Authentication" EKU (1.3.6.1.5.5.7.3.1). Reissue it from a suitable template.'
+        Nps    = 'The client certificate lacks the "Client Authentication" EKU (1.3.6.1.5.5.7.3.2). Check the certificate template.'
+    }
+    'CERT_E_PURPOSE'        = @{
+        Client = 'The NPS certificate lacks the "Server Authentication" EKU (1.3.6.1.5.5.7.3.1). Reissue it from a suitable template.'
+        Nps    = 'The client certificate lacks the "Client Authentication" EKU (1.3.6.1.5.5.7.3.2). Check the certificate template.'
+    }
+}
+$Script:Dot1xGuidance['SEC_E_UNTRUSTED_ROOT'] = $Script:Dot1xGuidance['CERT_E_UNTRUSTEDROOT']
+$Script:Dot1xGuidance['SEC_E_CERT_EXPIRED'] = $Script:Dot1xGuidance['CERT_E_EXPIRED']
+$Script:Dot1xGuidance['SEC_E_WRONG_PRINCIPAL'] = $Script:Dot1xGuidance['CERT_E_CN_NO_MATCH']
+
+function Get-Dot1xWinEvent {
+    <#
+    .SYNOPSIS
+        Reads events with Get-WinEvent and returns an empty result instead of failing when nothing matches.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$FilterHashtable,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxEvents = 5000
+    )
+
+    try {
+        return @(Get-WinEvent -FilterHashtable $FilterHashtable -MaxEvents $MaxEvents -ErrorAction Stop)
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
+            Write-Warning "Could not read log '$($FilterHashtable.LogName)': $($_.Exception.Message)"
+        }
+        return @()
+    }
+}
+
+function Test-Dot1xCertificateReason {
+    <#
+    .SYNOPSIS
+        Heuristic: decides whether an NPS rejection (reason code/text) points to a certificate or TLS problem.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [int]$ReasonCode = 0,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Reason
+    )
+
+    # Reason codes >= 256 are typically raised by the EAP/TLS stack; the text check covers English and German systems
+    if ($ReasonCode -ge 256) {
+        return $true
+    }
+
+    return [bool]($Reason -match 'certificate|\bCRL\b|revocation|revoked|trust|chain|expired|\bTLS\b|signature|Zertifikat|Sperrliste|Sperr|vertrauensw|Stammzertifizierung')
+}
+
+function Convert-Dot1xRejection {
+    <#
+    .SYNOPSIS
+        Converts an NPS Security event (6273/6274) into a flat object.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Event
+    )
+
+    $Data = @{}
+    $Xml = [xml]$Event.ToXml()
+    foreach ($Node in $Xml.GetElementsByTagName('Data')) {
+        $DataName = $Node.GetAttribute('Name')
+        if ($DataName) {
+            $Data[$DataName] = $Node.'#text'
+        }
+    }
+
+    $Code = 0
+    [void][int]::TryParse([string]$Data['ReasonCode'], [ref]$Code)
+
+    $UserName = $Data['FullyQualifiedSubjectUserName']
+    if (-not $UserName -or $UserName -eq '-') {
+        $UserName = $Data['SubjectUserName']
+    }
+
+    [PSCustomObject]@{
+        TimeCreated        = $Event.TimeCreated
+        EventID            = $Event.Id
+        UserName           = $UserName
+        CallingStationID   = $Data['CallingStationID']
+        ClientName         = $Data['ClientName']
+        NasIdentifier      = $Data['NASIdentifier']
+        NetworkPolicy      = $Data['NetworkPolicyName']
+        AuthenticationType = $Data['AuthenticationType']
+        EapType            = $Data['EAPType']
+        ReasonCode         = $Code
+        Reason             = $Data['Reason']
+        CertificateRelated = (Test-Dot1xCertificateReason -ReasonCode $Code -Reason $Data['Reason'])
+        CorrelatedTaskID   = $null
+        CorrelatedErrors   = $null
+    }
+}
+
+function New-Dot1xFinding {
+    <#
+    .SYNOPSIS
+        Creates a finding object used in the 802.1X diagnosis summary.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Critical', 'Warning', 'Info')]
+        [string]$Severity,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Summary,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Recommendation,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Count = 1
+    )
+
+    [PSCustomObject]@{
+        Severity       = $Severity
+        Source         = $Source
+        Summary        = $Summary
+        Recommendation = $Recommendation
+        Count          = $Count
+    }
+}
+
+function Get-Dot1xCertificateInventory {
+    <#
+    .SYNOPSIS
+        Lists local certificates usable for 802.1X (Server Authentication on the NPS, Client Authentication on clients).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Nps', 'Client')]
+        [string]$Role
+    )
+
+    $Oid = if ($Role -eq 'Nps') { '1.3.6.1.5.5.7.3.1' } else { '1.3.6.1.5.5.7.3.2' }
+    $Stores = if ($Role -eq 'Nps') { @('Cert:\LocalMachine\My') } else { @('Cert:\LocalMachine\My', 'Cert:\CurrentUser\My') }
+
+    foreach ($Store in $Stores) {
+        $Certs = Get-ChildItem -Path $Store -ErrorAction SilentlyContinue |
+            Where-Object { $_.EnhancedKeyUsageList.ObjectId -contains $Oid }
+
+        foreach ($Cert in $Certs) {
+            $DaysLeft = [int][math]::Floor(($Cert.NotAfter - (Get-Date)).TotalDays)
+            [PSCustomObject]@{
+                Store         = $Store
+                Subject       = $Cert.Subject
+                Issuer        = $Cert.Issuer
+                Thumbprint    = $Cert.Thumbprint
+                NotAfter      = $Cert.NotAfter
+                DaysLeft      = $DaysLeft
+                HasPrivateKey = $Cert.HasPrivateKey
+                Status        = if ($DaysLeft -lt 0) { 'Expired' } elseif ($DaysLeft -le 30) { 'ExpiringSoon' } else { 'Valid' }
+            }
+        }
+    }
+}
+
+function ConvertTo-Dot1xHtmlReport {
+    <#
+    .SYNOPSIS
+        Renders an 802.1X diagnosis object as a self-contained HTML report.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Diagnosis
+    )
+
+    $Encode = { param($Value) [System.Net.WebUtility]::HtmlEncode([string]$Value) }
+
+    $Table = {
+        param($Rows, [string[]]$Properties)
+        $Rows = @($Rows)
+        if ($Rows.Count -eq 0) {
+            return '<p><em>No entries.</em></p>'
+        }
+        $Html = New-Object System.Text.StringBuilder
+        [void]$Html.Append('<table><tr>')
+        foreach ($Property in $Properties) {
+            [void]$Html.Append("<th>$(& $Encode $Property)</th>")
+        }
+        [void]$Html.Append('</tr>')
+        foreach ($Row in $Rows) {
+            $Class = if ($Row.PSObject.Properties['Severity']) { " class=`"$($Row.Severity)`"" } else { '' }
+            [void]$Html.Append("<tr$Class>")
+            foreach ($Property in $Properties) {
+                $Value = $Row.$Property
+                if ($Value -is [array]) { $Value = $Value -join ', ' }
+                [void]$Html.Append("<td>$(& $Encode $Value)</td>")
+            }
+            [void]$Html.Append('</tr>')
+        }
+        [void]$Html.Append('</table>')
+        $Html.ToString()
+    }
+
+    $Page = New-Object System.Text.StringBuilder
+    [void]$Page.AppendLine('<!DOCTYPE html><html><head><meta charset="utf-8"><title>802.1X Certificate Diagnosis</title>')
+    [void]$Page.AppendLine('<style>body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#222}h1{color:#0b5394}h2{border-bottom:2px solid #0b5394;padding-bottom:4px;margin-top:28px}table{border-collapse:collapse;width:100%;font-size:13px}th{background:#0b5394;color:#fff;text-align:left;padding:6px}td{border:1px solid #ccc;padding:5px;vertical-align:top}tr.Critical td{background:#fde2e2}tr.Warning td{background:#fff4d6}tr.Info td{background:#eef6ff}.meta{color:#555}</style></head><body>')
+    [void]$Page.AppendLine("<h1>802.1X Certificate Diagnosis</h1>")
+    [void]$Page.AppendLine("<p class=`"meta`">Computer: $(& $Encode $Diagnosis.ComputerName) | Role: $(& $Encode $Diagnosis.Role) | Window: $(& $Encode $Diagnosis.StartTime) - $(& $Encode $Diagnosis.EndTime) | CAPI2 error chains: $(@($Diagnosis.CapiChains).Count) | NPS rejections: $(@($Diagnosis.NpsRejections).Count)</p>")
+    [void]$Page.AppendLine('<h2>Findings</h2>')
+    [void]$Page.AppendLine((& $Table $Diagnosis.Findings @('Severity', 'Source', 'Count', 'Summary', 'Recommendation')))
+
+    if ($Diagnosis.Role -eq 'Nps') {
+        [void]$Page.AppendLine('<h2>NPS rejections (Security 6273/6274)</h2>')
+        [void]$Page.AppendLine((& $Table $Diagnosis.NpsRejections @('TimeCreated', 'UserName', 'CallingStationID', 'ClientName', 'EapType', 'ReasonCode', 'Reason', 'CertificateRelated', 'CorrelatedErrors')))
+    }
+    else {
+        [void]$Page.AppendLine('<h2>Client 802.1X events (Wired/WLAN AutoConfig, EapHost)</h2>')
+        [void]$Page.AppendLine((& $Table $Diagnosis.ClientEvents @('TimeCreated', 'Log', 'EventID', 'Level', 'Message')))
+    }
+
+    [void]$Page.AppendLine('<h2>CAPI2 error chains</h2>')
+    [void]$Page.AppendLine((& $Table $Diagnosis.CapiChains @('TimeCreated', 'Certificate', 'Errors', 'ErrorCount', 'TaskID')))
+    [void]$Page.AppendLine('<h2>Local certificates relevant for 802.1X</h2>')
+    [void]$Page.AppendLine((& $Table $Diagnosis.LocalCertificates @('Store', 'Subject', 'Issuer', 'NotAfter', 'DaysLeft', 'HasPrivateKey', 'Status', 'Thumbprint')))
+    [void]$Page.AppendLine('</body></html>')
+
+    $Page.ToString()
+}
+
+function Get-CapiDot1xDiagnosis {
+    <#
+    .SYNOPSIS
+        Diagnoses certificate problems in 802.1X (EAP-TLS/PEAP) authentication on an NPS/RADIUS server or a client.
+
+    .DESCRIPTION
+        Combines the evidence needed to troubleshoot 802.1X certificate failures in one report:
+
+        - CAPI2 certificate validation errors (via Get-CapiAllErrors) with 802.1X specific remediation hints
+        - NPS server: rejected authentications from the Security log (events 6273/6274) including reason code,
+          user, calling station and EAP type. Certificate related rejections are correlated with the CAPI2 error
+          chain that occurred at the same time.
+        - Client: errors and warnings from the Wired-AutoConfig, WLAN-AutoConfig and EapHost logs, and the state
+          of the dot3svc/wlansvc services.
+        - Local certificate inventory (Server Authentication certificates on the NPS, Client Authentication
+          certificates on the client) with expiration and private key checks.
+
+        Run it directly after reproducing the failed authentication. CAPI2 logging must be enabled
+        (see Start-CAPI2Troubleshooting). Reading the Security log requires an elevated session.
+
+        The role is detected automatically: a machine with the IAS (NPS) service is treated as NPS server.
+
+    .PARAMETER Role
+        Auto (default), Nps or Client. Determines which evidence sources and which guidance are used.
+
+    .PARAMETER Hours
+        Time window to analyze, counted back from now. Default is 1 hour.
+
+    .PARAMETER Name
+        Optional wildcard filter. Applies to the certificate name of CAPI2 chains and, on the NPS,
+        to the user name and calling station ID of rejected authentications.
+
+    .PARAMETER MaxEvents
+        Maximum number of events read per log. Default is 5000.
+
+    .PARAMETER CorrelationWindowSeconds
+        Maximum time distance between an NPS rejection and a CAPI2 error chain to treat them as related. Default is 120.
+
+    .PARAMETER ExportPath
+        Optional directory. A report file named Dot1xDiagnosis_<computer>_<timestamp>.<format> is written there.
+
+    .PARAMETER Format
+        Report format when ExportPath is set: HTML (default) or JSON.
+
+    .PARAMETER SkipCertificateInventory
+        Skips the local certificate store inventory.
+
+    .EXAMPLE
+        Get-CapiDot1xDiagnosis
+
+        Analyzes the last hour on this machine, detecting NPS or client role automatically.
+
+    .EXAMPLE
+        Get-CapiDot1xDiagnosis -Role Nps -Hours 4 -ExportPath C:\Reports
+
+        NPS server: rejected authentications of the last 4 hours, correlated with CAPI2 errors, exported as HTML.
+
+    .EXAMPLE
+        Get-CapiDot1xDiagnosis -Role Nps -Name '*pc123*'
+
+        Only rejections and CAPI2 chains that belong to a specific client.
+
+    .EXAMPLE
+        (Get-CapiDot1xDiagnosis -Role Client).Findings | Format-List
+
+        Client: lists findings with recommendations.
+
+    .OUTPUTS
+        PSCustomObject with Role, Findings, NpsRejections, ClientEvents, CapiChains and LocalCertificates.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Auto', 'Nps', 'Client')]
+        [string]$Role = 'Auto',
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 720)]
+        [int]$Hours = 1,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(100, 50000)]
+        [int]$MaxEvents = 5000,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 3600)]
+        [int]$CorrelationWindowSeconds = 120,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ExportPath,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('HTML', 'JSON')]
+        [string]$Format = 'HTML',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipCertificateInventory
+    )
+
+    $EndTime = Get-Date
+    $StartTime = $EndTime.AddHours(-$Hours)
+
+    if ($Role -eq 'Auto') {
+        $Role = if (Get-Service -Name 'IAS' -ErrorAction SilentlyContinue) { 'Nps' } else { 'Client' }
+    }
+    $Side = if ($Role -eq 'Nps') { 'Nps' } else { 'Client' }
+
+    Write-Host "`n=== 802.1X Certificate Diagnosis ($Role) ===" -ForegroundColor Cyan
+    Write-Host "Time range: last $Hours hour(s), computer: $env:COMPUTERNAME`n" -ForegroundColor Gray
+
+    $Findings = New-Object System.Collections.Generic.List[object]
+
+    # CAPI2 log state
+    try {
+        $Capi2Log = Get-WinEvent -ListLog 'Microsoft-Windows-CAPI2/Operational' -ErrorAction Stop
+        if (-not $Capi2Log.IsEnabled) {
+            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'CAPI2' -Summary 'CAPI2 Operational log is disabled, certificate validation cannot be analyzed.' -Recommendation 'Run Start-CAPI2Troubleshooting, reproduce the authentication, then run this command again.'))
+        }
+    }
+    catch {
+        Write-Verbose "Could not query CAPI2 log state: $($_.Exception.Message)"
+    }
+
+    # CAPI2 error chains
+    $Chains = @(Get-CapiAllErrors -Hours $Hours -MaxEvents $MaxEvents 6>$null | Where-Object { $_ -and $_.TaskID })
+    if ($Name) {
+        $Chains = @($Chains | Where-Object { $_.Certificate -like "*$Name*" })
+    }
+
+    $ErrorGroups = @{}
+    foreach ($Chain in $Chains) {
+        foreach ($ErrorName in ($Chain.Errors -split ',\s*' | Where-Object { $_ })) {
+            if (-not $ErrorGroups.ContainsKey($ErrorName)) {
+                $ErrorGroups[$ErrorName] = New-Object System.Collections.Generic.List[object]
+            }
+            $ErrorGroups[$ErrorName].Add($Chain)
+        }
+    }
+
+    foreach ($ErrorName in $ErrorGroups.Keys) {
+        $Group = $ErrorGroups[$ErrorName]
+        $Details = $Script:CAPI2ErrorCodes.Values | Where-Object { $_.HexCode -eq $ErrorName } | Select-Object -First 1
+        $Hint = if ($Script:Dot1xGuidance.ContainsKey($ErrorName)) {
+            $Script:Dot1xGuidance[$ErrorName][$Side]
+        }
+        elseif ($Details) {
+            $Details.Resolution
+        }
+        else {
+            'Search the Microsoft documentation for the error code and inspect the chain with Get-CapiErrorAnalysis -ShowEventChain.'
+        }
+        $Severity = if ($Details -and $Details.Severity -eq 'Critical') { 'Critical' } elseif ($Details -and $Details.Severity -eq 'Warning') { 'Warning' } else { 'Info' }
+        $Samples = ($Group | ForEach-Object { $_.Certificate } | Where-Object { $_ } | Select-Object -Unique -First 3) -join '; '
+        $Findings.Add((New-Dot1xFinding -Severity $Severity -Source 'CAPI2' -Summary "$ErrorName in $($Group.Count) validation chain(s). Certificates: $Samples" -Recommendation $Hint -Count $Group.Count))
+    }
+
+    # NPS evidence
+    $Rejections = @()
+    $GrantedCount = 0
+    if ($Role -eq 'Nps') {
+        $Rejections = @(Get-Dot1xWinEvent -FilterHashtable @{ LogName = 'Security'; Id = 6273, 6274; StartTime = $StartTime } -MaxEvents $MaxEvents |
+                ForEach-Object { Convert-Dot1xRejection -Event $_ })
+        if ($Name) {
+            $Rejections = @($Rejections | Where-Object { $_.UserName -like "*$Name*" -or $_.CallingStationID -like "*$Name*" })
+        }
+        $GrantedCount = @(Get-Dot1xWinEvent -FilterHashtable @{ LogName = 'Security'; Id = 6272; StartTime = $StartTime } -MaxEvents $MaxEvents).Count
+
+        foreach ($Rejection in ($Rejections | Where-Object { $_.CertificateRelated })) {
+            $Closest = $Chains |
+                Where-Object { [math]::Abs(($_.TimeCreated - $Rejection.TimeCreated).TotalSeconds) -le $CorrelationWindowSeconds } |
+                Sort-Object { [math]::Abs(($_.TimeCreated - $Rejection.TimeCreated).TotalSeconds) } |
+                Select-Object -First 1
+            if ($Closest) {
+                $Rejection.CorrelatedTaskID = $Closest.TaskID
+                $Rejection.CorrelatedErrors = $Closest.Errors
+            }
+        }
+
+        foreach ($Group in ($Rejections | Group-Object -Property ReasonCode)) {
+            $First = $Group.Group | Select-Object -First 1
+            $CorrelatedNames = ($Group.Group | ForEach-Object { $_.CorrelatedErrors } | Where-Object { $_ } | Select-Object -Unique) -join ', '
+            if ($First.CertificateRelated) {
+                $Recommendation = 'Certificate related rejection.'
+                if ($CorrelatedNames) {
+                    $Recommendation += " Correlated CAPI2 errors: $CorrelatedNames (see the CAPI2 findings)."
+                }
+                else {
+                    $Recommendation += ' No CAPI2 chain found at that time: enable CAPI2 logging on the NPS and reproduce, or check the EAP-TLS/PEAP settings in the network policy.'
+                }
+                $Severity = 'Critical'
+            }
+            else {
+                $Recommendation = 'Probably not a PKI problem (credentials, network policy/connection request policy match, authentication method). Check the NPS policies and the account.'
+                $Severity = 'Warning'
+            }
+            $Findings.Add((New-Dot1xFinding -Severity $Severity -Source 'NPS Security log' -Summary "Reason code $($First.ReasonCode): $($First.Reason) ($($Group.Count) rejection(s))" -Recommendation $Recommendation -Count $Group.Count))
+        }
+
+        $IasService = Get-Service -Name 'IAS' -ErrorAction SilentlyContinue
+        if ($IasService -and $IasService.Status -ne 'Running') {
+            $Findings.Add((New-Dot1xFinding -Severity Critical -Source 'Service' -Summary "Network Policy Server service (IAS) is $($IasService.Status)." -Recommendation 'Start the service and check the System and NPS logs for the reason it stopped.'))
+        }
+    }
+
+    # Client evidence
+    $ClientEvents = @()
+    if ($Role -eq 'Client') {
+        $ClientLogs = @('Microsoft-Windows-Wired-AutoConfig/Operational', 'Microsoft-Windows-WLAN-AutoConfig/Operational', 'Microsoft-Windows-EapHost/Operational')
+        foreach ($LogName in $ClientLogs) {
+            $LogInfo = Get-WinEvent -ListLog $LogName -ErrorAction SilentlyContinue
+            if (-not $LogInfo) { continue }
+            if (-not $LogInfo.IsEnabled) {
+                $Findings.Add((New-Dot1xFinding -Severity Info -Source $LogName -Summary 'Log is disabled.' -Recommendation "Enable it with: wevtutil sl $LogName /e:true"))
+                continue
+            }
+            $ClientEvents += @(Get-Dot1xWinEvent -FilterHashtable @{ LogName = $LogName; StartTime = $StartTime; Level = 1, 2, 3 } -MaxEvents $MaxEvents |
+                    ForEach-Object {
+                        $FirstLine = if ($_.Message) { ($_.Message -split "`r?`n")[0] } else { '' }
+                        [PSCustomObject]@{
+                            TimeCreated = $_.TimeCreated
+                            Log         = ($LogName -replace '^Microsoft-Windows-|/Operational$', '')
+                            EventID     = $_.Id
+                            Level       = $_.LevelDisplayName
+                            Message     = $FirstLine
+                        }
+                    })
+        }
+        if ($ClientEvents.Count -gt 0) {
+            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'Client logs' -Summary "$($ClientEvents.Count) error/warning event(s) in Wired/WLAN AutoConfig or EapHost." -Recommendation 'Review the ClientEvents property and correlate timestamps with the CAPI2 findings.' -Count $ClientEvents.Count))
+        }
+
+        foreach ($ServiceName in 'dot3svc', 'wlansvc') {
+            $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($Service -and $Service.Status -ne 'Running') {
+                $Findings.Add((New-Dot1xFinding -Severity Info -Source 'Service' -Summary "$ServiceName is $($Service.Status)." -Recommendation "802.1X on $(if ($ServiceName -eq 'dot3svc') { 'wired' } else { 'wireless' }) interfaces requires this service. Ignore if the interface type is not used."))
+            }
+        }
+    }
+
+    # Local certificate inventory
+    $LocalCerts = @()
+    if (-not $SkipCertificateInventory) {
+        $LocalCerts = @(Get-Dot1xCertificateInventory -Role $Side)
+        $Purpose = if ($Role -eq 'Nps') { 'Server Authentication' } else { 'Client Authentication' }
+
+        if ($LocalCerts.Count -eq 0 -and $Role -eq 'Nps') {
+            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'Certificates' -Summary "No $Purpose certificate found in LocalMachine\My." -Recommendation 'PEAP and EAP-TLS require a server certificate on the NPS. Enroll one and select it in the network policy.'))
+        }
+        elseif ($LocalCerts.Count -eq 0) {
+            $Findings.Add((New-Dot1xFinding -Severity Info -Source 'Certificates' -Summary "No $Purpose certificate found in the machine or user store." -Recommendation 'Required for EAP-TLS. Ignore for PEAP-MSCHAPv2. Check auto-enrollment (certutil -pulse) and the certificate template permissions.'))
+        }
+
+        foreach ($Cert in ($LocalCerts | Where-Object { $_.Status -eq 'Expired' })) {
+            $Findings.Add((New-Dot1xFinding -Severity Critical -Source 'Certificates' -Summary "Expired $Purpose certificate: $($Cert.Subject) ($($Cert.Store), expired $($Cert.NotAfter))" -Recommendation 'Renew it and remove the expired certificate so it is not selected for authentication.'))
+        }
+        foreach ($Cert in ($LocalCerts | Where-Object { $_.Status -eq 'ExpiringSoon' })) {
+            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'Certificates' -Summary "$Purpose certificate expires in $($Cert.DaysLeft) day(s): $($Cert.Subject) ($($Cert.Store))" -Recommendation 'Renew it in time and update the NPS network policy or EAP profile if the certificate is bound explicitly.'))
+        }
+        foreach ($Cert in ($LocalCerts | Where-Object { -not $_.HasPrivateKey })) {
+            $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'Certificates' -Summary "$Purpose certificate without private key: $($Cert.Subject) ($($Cert.Store))" -Recommendation 'Without the private key the certificate cannot be used for authentication. Re-enroll or restore the key.'))
+        }
+    }
+
+    if ($Findings.Count -eq 0) {
+        $Findings.Add((New-Dot1xFinding -Severity Info -Source 'Summary' -Summary "No certificate errors found in the last $Hours hour(s)." -Recommendation 'Make sure CAPI2 logging was enabled and the failing authentication happened inside the time window. Increase -Hours if needed.' -Count 0))
+    }
+
+    $SeverityOrder = @{ Critical = 0; Warning = 1; Info = 2 }
+    $SortedFindings = @($Findings | Sort-Object { $SeverityOrder[$_.Severity] }, @{ Expression = 'Count'; Descending = $true })
+
+    $Diagnosis = [PSCustomObject]@{
+        ComputerName      = $env:COMPUTERNAME
+        Role              = $Role
+        StartTime         = $StartTime
+        EndTime           = $EndTime
+        Findings          = $SortedFindings
+        NpsRejections     = $Rejections
+        NpsAccessGranted  = $GrantedCount
+        ClientEvents      = $ClientEvents
+        CapiChains        = $Chains
+        LocalCertificates = $LocalCerts
+    }
+
+    # Console summary
+    $Colors = @{ Critical = 'Red'; Warning = 'Yellow'; Info = 'Gray' }
+    Write-Host "CAPI2 error chains: $($Chains.Count)" -ForegroundColor White
+    if ($Role -eq 'Nps') {
+        Write-Host "NPS rejected: $($Rejections.Count), granted: $GrantedCount" -ForegroundColor White
+    }
+    else {
+        Write-Host "Client error/warning events: $($ClientEvents.Count)" -ForegroundColor White
+    }
+    Write-Host "`n=== Findings ===" -ForegroundColor Cyan
+    foreach ($Finding in $SortedFindings) {
+        Write-Host "[$($Finding.Severity)] $($Finding.Source): $($Finding.Summary)" -ForegroundColor $Colors[$Finding.Severity]
+        if ($Finding.Recommendation) {
+            Write-Host "    $(Get-DisplayChar 'RightArrow') $($Finding.Recommendation)" -ForegroundColor Gray
+        }
+    }
+
+    if ($ExportPath) {
+        if (-not (Test-Path -Path $ExportPath)) {
+            New-Item -Path $ExportPath -ItemType Directory -Force | Out-Null
+        }
+        $FileName = 'Dot1xDiagnosis_{0}_{1:yyyyMMdd_HHmmss}.{2}' -f $env:COMPUTERNAME, $EndTime, $Format.ToLower()
+        $FilePath = Join-Path -Path $ExportPath -ChildPath $FileName
+
+        if ($Format -eq 'HTML') {
+            ConvertTo-Dot1xHtmlReport -Diagnosis $Diagnosis | Set-Content -Path $FilePath -Encoding UTF8
+        }
+        else {
+            $Json = $Diagnosis | Select-Object -Property * -ExcludeProperty CapiChains
+            $Json | Add-Member -NotePropertyName CapiChains -NotePropertyValue @($Chains | Select-Object -Property * -ExcludeProperty Events)
+            $Json | ConvertTo-Json -Depth 5 | Set-Content -Path $FilePath -Encoding UTF8
+        }
+        Write-Host "`n$(Get-DisplayChar 'Checkmark') Report written to $FilePath" -ForegroundColor Green
+    }
+
+    Write-Host ""
+    return $Diagnosis
+}
+
+#endregion
+
 #region Aliases
 
 # Create friendly aliases for common commands
@@ -3460,7 +4057,7 @@ New-Alias -Name 'Clear-CapiLog' -Value 'Clear-CAPI2EventLog' -Description 'Alias
 Export-ModuleMember -Function Find-CapiEventsByName, Get-CapiTaskIDEvents, Get-CapiAllErrors, Convert-EventLogRecord, Format-XML, `
     Enable-CAPI2EventLog, Disable-CAPI2EventLog, Clear-CAPI2EventLog, Get-CAPI2EventLogStatus, `
     Get-CapiErrorAnalysis, Export-CapiEvents, Compare-CapiEvents, Get-CAPI2ErrorDetails, `
-    Get-CapiCertificateReport, Start-CAPI2Troubleshooting, Stop-CAPI2Troubleshooting `
+    Get-CapiCertificateReport, Start-CAPI2Troubleshooting, Stop-CAPI2Troubleshooting, Get-CapiDot1xDiagnosis `
     -Alias 'Find-CertEvents', 'Get-CertChain', 'Get-AllErrors', 'Enable-CapiLog', 'Disable-CapiLog', 'Clear-CapiLog'
 
 <#

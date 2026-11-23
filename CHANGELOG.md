@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.14.0] - 2026-11-23
+
+### Added
+- **`Get-CapiDot1xDiagnosis`**: 802.1X (EAP-TLS/PEAP) certificate troubleshooting for NPS servers and clients
+  - Role detection (`IAS` service = NPS) with `-Role Auto|Nps|Client`
+  - NPS: rejected authentications from Security events 6273/6274 (reason code, user, calling station, EAP type), granted count from 6272
+  - Certificate related rejections are correlated with the CAPI2 error chain within `-CorrelationWindowSeconds`
+  - Client: errors/warnings from Wired-AutoConfig, WLAN-AutoConfig and EapHost logs, `dot3svc`/`wlansvc` service state
+  - Role specific remediation hints for the common CAPI2 errors (untrusted root/NTAuth, revocation offline, name mismatch, EKU, expiry)
+  - Local certificate inventory (Server Authentication on NPS, Client Authentication on client) with expiry and private key checks
+  - Export as HTML or JSON via `-ExportPath` and `-Format`
+- Pester tests with mocked event logs, services and certificate stores (`Tests/Dot1xDiagnosis.Tests.ps1`)
+- Example script `Examples/Dot1x-Troubleshooting.ps1` and README section "802.1X / NPS Troubleshooting"
+
+---
+
 ## [2.11.0] - 2025-12-10
 
 ### Added
