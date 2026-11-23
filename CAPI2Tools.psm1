@@ -3107,6 +3107,32 @@ function Stop-CAPI2Troubleshooting {
     Write-Host "   - If issue persists, compare before/after using Compare-CapiEvents`n" -ForegroundColor Gray
 }
 
+function Get-CapiEventCertificateName {
+    <#
+    .SYNOPSIS
+        Returns the certificate name of a CAPI2 event, from a subjectName element or from the subjectName attribute.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [xml]$EventXml
+    )
+
+    $Node = $EventXml.GetElementsByTagName('subjectName') | Select-Object -First 1
+    if ($Node -and $Node.'#text') {
+        return [string]$Node.'#text'
+    }
+
+    # Events 41, 42 and 90 carry the name as attribute (<Certificate subjectName="...">)
+    $AttributeNode = $EventXml.SelectNodes('//*[@subjectName]') | Select-Object -First 1
+    if ($AttributeNode) {
+        return [string]$AttributeNode.GetAttribute('subjectName')
+    }
+
+    return $null
+}
+
 function Get-CapiAllErrors {
     <#
     .SYNOPSIS
@@ -3254,12 +3280,8 @@ function Get-CapiAllErrors {
                     $TaskID = $AuxInfoNode.TaskId.Trim('{}')
                 }
                 
-                # Extract certificate name
-                $CertName = $null
-                $SubjectNode = $EventXml.GetElementsByTagName("subjectName") | Select-Object -First 1
-                if ($SubjectNode) {
-                    $CertName = $SubjectNode.'#text'
-                }
+                # Extract certificate name (element, or the subjectName attribute used by events 41/42/90)
+                $CertName = Get-CapiEventCertificateName -EventXml $EventXml
                 
                 $EventWithError = [PSCustomObject]@{
                     TimeCreated = $Event.TimeCreated

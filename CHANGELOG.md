@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.15.2] - 2026-11-23
+
+### Fixed
+- `Get-CapiAllErrors` (and therefore `Get-CapiDot1xDiagnosis`): the certificate name was shown as "(not available)" for chains whose error events (41 `CertVerifyRevocation`, 42 `CertRejectedRevocationInfo`, 90 `X509Objects`) carry the name as `subjectName` attribute instead of an element. New helper `Get-CapiEventCertificateName` reads both forms
+
+---
+
 ## [2.15.1] - 2026-11-23
 
 ### Changed

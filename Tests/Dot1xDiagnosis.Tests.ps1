@@ -277,6 +277,29 @@ Describe 'Convert-Dot1xRejection (real-world 6273, anonymized)' {
     }
 }
 
+Describe 'Get-CapiEventCertificateName' {
+
+    It 'reads the subjectName attribute of events 41/42 (revocation errors)' {
+        InModuleScope CAPI2Tools {
+            $Xml = [xml]'<CertVerifyRevocation xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><Certificate fileRef="AB.cer" subjectName="pc01.contoso.com" /><Result value="80092013" /></CertVerifyRevocation>'
+            Get-CapiEventCertificateName -EventXml $Xml | Should -Be 'pc01.contoso.com'
+        }
+    }
+
+    It 'reads a subjectName element' {
+        InModuleScope CAPI2Tools {
+            $Xml = [xml]'<Event><subjectName>www.contoso.com</subjectName></Event>'
+            Get-CapiEventCertificateName -EventXml $Xml | Should -Be 'www.contoso.com'
+        }
+    }
+
+    It 'returns nothing when there is no name' {
+        InModuleScope CAPI2Tools {
+            Get-CapiEventCertificateName -EventXml ([xml]'<Event><Result value="0" /></Event>') | Should -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'ConvertTo-Dot1xAuditStatus' {
 
     It 'parses English and German settings' {

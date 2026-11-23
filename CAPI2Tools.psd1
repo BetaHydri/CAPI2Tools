@@ -3,7 +3,7 @@
     RootModule           = 'CAPI2Tools.psm1'
     
     # Version number of this module.
-    ModuleVersion        = '2.15.1'
+    ModuleVersion        = '2.15.2'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -101,6 +101,9 @@ Features:
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
+## Version 2.15.2
+- Get-CapiAllErrors shows the certificate name for revocation errors (events 41/42/90 carry it as subjectName attribute); previously "(not available)"
+
 ## Version 2.15.1
 - Get-CapiDot1xDiagnosis correlates all NPS rejections (also reason code 1 "internal error") with CAPI2 errors; revocation guidance covers OCSP responses rejected for time validity
 
