@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.15.3] - 2026-11-23
+
+### Fixed
+- `Get-CapiDot1xDiagnosis` (NPS): unrelated CAPI2 error chains (for example "Microsoft Time-Stamp service" validations by Windows) were reported as critical 802.1X findings such as "client certificate has expired". When there are rejections, only chains that coincide with a rejection (`-CorrelationWindowSeconds`) produce findings; all others are summarized in one info finding (`CAPI2 (unrelated)`) and stay in `CapiChains`
+- The CAPI2 coverage check (log empty / started after the rejection / covered without error) ran only when no chain existed at all. It now runs whenever a certificate related rejection has no correlated chain, even if unrelated chains exist
+
+---
+
 ## [2.15.2] - 2026-11-23
 
 ### Fixed

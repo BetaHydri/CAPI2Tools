@@ -188,6 +188,43 @@ Describe 'Get-CapiDot1xDiagnosis' {
             $Result.FindingCount | Should -Be @($Result.Findings).Count
         }
 
+        It 'treats chains that do not coincide with a rejection as background noise' {
+            Mock -ModuleName CAPI2Tools Get-CapiAllErrors {
+                [PSCustomObject]@{
+                    TimeCreated = (Get-Date).AddHours(-3)
+                    TaskID      = '0C006082-6F06-4D5A-928E-15308F2A986C'
+                    Certificate = 'Microsoft Time-Stamp service'
+                    ErrorCount  = 7
+                    Errors      = 'CERT_E_EXPIRED, CRYPT_E_REVOCATION_OFFLINE'
+                    Events      = @()
+                }
+            }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            $Result.Findings | Where-Object { $_.Source -eq 'CAPI2' } | Should -BeNullOrEmpty
+            $Background = $Result.Findings | Where-Object { $_.Source -eq 'CAPI2 (unrelated)' }
+            $Background.Severity | Should -Be 'Info'
+            $Background.Summary | Should -Match 'Microsoft Time-Stamp service'
+            @($Result.CapiChains).Count | Should -Be 1
+        }
+
+        It 'still asks for the CAPI2 coverage when only unrelated chains exist' {
+            Mock -ModuleName CAPI2Tools Get-CapiAllErrors {
+                [PSCustomObject]@{
+                    TimeCreated = (Get-Date).AddHours(-3)
+                    TaskID      = '0C006082-6F06-4D5A-928E-15308F2A986C'
+                    Certificate = 'Microsoft Time-Stamp service'
+                    ErrorCount  = 1
+                    Errors      = 'CRYPT_E_REVOCATION_OFFLINE'
+                    Events      = @()
+                }
+            }
+            Mock -ModuleName CAPI2Tools Get-Dot1xCapi2Coverage {
+                [PSCustomObject]@{ Oldest = (Get-Date).AddMinutes(10); Newest = (Get-Date).AddMinutes(11) }
+            }
+            $Result = Get-CapiDot1xDiagnosis -Role Nps -SkipCertificateInventory 6>$null
+            ($Result.Findings | Where-Object { $_.Source -eq 'CAPI2 log' }).Summary | Should -Match 'starts at'
+        }
+
         It 'warns when the CAPI2 log started after the rejection' {
             Mock -ModuleName CAPI2Tools Get-CapiAllErrors { }
             Mock -ModuleName CAPI2Tools Get-Dot1xCapi2Coverage {

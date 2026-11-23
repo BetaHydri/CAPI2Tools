@@ -3951,33 +3951,6 @@ function Get-CapiDot1xDiagnosis {
         $Chains = @($Chains | Where-Object { $_.Certificate -like "*$Name*" })
     }
 
-    $ErrorGroups = @{}
-    foreach ($Chain in $Chains) {
-        foreach ($ErrorName in ($Chain.Errors -split ',\s*' | Where-Object { $_ })) {
-            if (-not $ErrorGroups.ContainsKey($ErrorName)) {
-                $ErrorGroups[$ErrorName] = New-Object System.Collections.Generic.List[object]
-            }
-            $ErrorGroups[$ErrorName].Add($Chain)
-        }
-    }
-
-    foreach ($ErrorName in $ErrorGroups.Keys) {
-        $Group = $ErrorGroups[$ErrorName]
-        $Details = $Script:CAPI2ErrorCodes.Values | Where-Object { $_.HexCode -eq $ErrorName } | Select-Object -First 1
-        $Hint = if ($Script:Dot1xGuidance.ContainsKey($ErrorName)) {
-            $Script:Dot1xGuidance[$ErrorName][$Side]
-        }
-        elseif ($Details) {
-            $Details.Resolution
-        }
-        else {
-            'Search the Microsoft documentation for the error code and inspect the chain with Get-CapiErrorAnalysis -ShowEventChain.'
-        }
-        $Severity = if ($Details -and $Details.Severity -eq 'Critical') { 'Critical' } elseif ($Details -and $Details.Severity -eq 'Warning') { 'Warning' } else { 'Info' }
-        $Samples = ($Group | ForEach-Object { $_.Certificate } | Where-Object { $_ } | Select-Object -Unique -First 3) -join '; '
-        $Findings.Add((New-Dot1xFinding -Severity $Severity -Source 'CAPI2' -Summary "$ErrorName in $($Group.Count) validation chain(s). Certificates: $Samples" -Recommendation $Hint -Count $Group.Count))
-    }
-
     # NPS evidence
     $Rejections = @()
     $GrantedCount = 0
@@ -4079,21 +4052,62 @@ function Get-CapiDot1xDiagnosis {
             $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'System log' -Summary "$($SystemEvents.Count) Schannel/NPS error or warning event(s): $TopEvents" -Recommendation 'Schannel events describe TLS and certificate failures of the EAP handshake, NPS events describe policy and service problems. See the SystemEvents property for the full text.' -Count $SystemEvents.Count))
         }
 
-        # Without a CAPI2 chain it matters whether the log covers the time of the rejection at all
-        $CertRejections = @($Rejections | Where-Object { $_.CertificateRelated })
-        if ($CertRejections.Count -gt 0 -and $Chains.Count -eq 0) {
+        # A rejection without a correlated CAPI2 chain needs the coverage question, even if unrelated chains exist
+        $CertRejections = @($Rejections | Where-Object { $_.CertificateRelated -and -not $_.CorrelatedTaskID })
+        if ($CertRejections.Count -gt 0) {
             $Coverage = Get-Dot1xCapi2Coverage
             $FirstRejection = ($CertRejections | Sort-Object -Property TimeCreated | Select-Object -First 1).TimeCreated
             if (-not $Coverage -or -not $Coverage.Oldest) {
                 $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'CAPI2 log' -Summary 'The CAPI2 log contains no events, so the cause of the certificate rejection cannot be shown.' -Recommendation 'Run Start-CAPI2Troubleshooting on the NPS, let the client authenticate again, then run this command again.'))
             }
             elseif ($Coverage.Oldest -gt $FirstRejection) {
-                $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'CAPI2 log' -Summary "The CAPI2 log starts at $($Coverage.Oldest), after the first certificate related rejection at $FirstRejection." -Recommendation 'Let the client authenticate again now (adapter off/on or wait for the next retry) and run this command again.'))
+                $Findings.Add((New-Dot1xFinding -Severity Warning -Source 'CAPI2 log' -Summary "The CAPI2 log starts at $($Coverage.Oldest), after the first certificate related rejection at $FirstRejection. No CAPI2 chain belongs to the rejections before that time." -Recommendation 'Let the client authenticate again now (adapter off/on or wait for the next retry) and run this command again within a few minutes.'))
             }
             else {
-                $Findings.Add((New-Dot1xFinding -Severity Info -Source 'CAPI2 log' -Summary 'The CAPI2 log covers the time of the rejection but recorded no validation error.' -Recommendation 'The rejection is probably not caused by CAPI2 chain building. Check the SystemEvents (Schannel) and the NTAuth store (certutil -viewstore -enterprise NTAuth). For more Schannel detail set HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\EventLogging (DWORD) to 7, reproduce, and set it back.'))
+                $Findings.Add((New-Dot1xFinding -Severity Info -Source 'CAPI2 log' -Summary 'The CAPI2 log covers the time of the rejection but recorded no validation error for it.' -Recommendation 'The rejection is probably not caused by CAPI2 chain building. Check the SystemEvents (Schannel) and the Schannel registry settings (ClientAuthTrustMode). For more Schannel detail set HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\EventLogging (DWORD) to 7, reproduce, and set it back.'))
             }
         }
+    }
+
+    # CAPI2 findings: on an NPS with rejections only chains that coincide with a rejection count, the rest is background noise
+    $FindingChains = @($Chains)
+    $BackgroundChains = @()
+    if ($Role -eq 'Nps' -and @($Rejections).Count -gt 0) {
+        $CorrelatedIds = @($Rejections | Where-Object { $_.CorrelatedTaskID } | ForEach-Object { $_.CorrelatedTaskID })
+        $FindingChains = @($Chains | Where-Object { $CorrelatedIds -contains $_.TaskID })
+        $BackgroundChains = @($Chains | Where-Object { $CorrelatedIds -notcontains $_.TaskID })
+    }
+
+    $ErrorGroups = @{}
+    foreach ($Chain in $FindingChains) {
+        foreach ($ErrorName in ($Chain.Errors -split ',\s*' | Where-Object { $_ })) {
+            if (-not $ErrorGroups.ContainsKey($ErrorName)) {
+                $ErrorGroups[$ErrorName] = New-Object System.Collections.Generic.List[object]
+            }
+            $ErrorGroups[$ErrorName].Add($Chain)
+        }
+    }
+
+    foreach ($ErrorName in $ErrorGroups.Keys) {
+        $Group = $ErrorGroups[$ErrorName]
+        $Details = $Script:CAPI2ErrorCodes.Values | Where-Object { $_.HexCode -eq $ErrorName } | Select-Object -First 1
+        $Hint = if ($Script:Dot1xGuidance.ContainsKey($ErrorName)) {
+            $Script:Dot1xGuidance[$ErrorName][$Side]
+        }
+        elseif ($Details) {
+            $Details.Resolution
+        }
+        else {
+            'Search the Microsoft documentation for the error code and inspect the chain with Get-CapiErrorAnalysis -ShowEventChain.'
+        }
+        $Severity = if ($Details -and $Details.Severity -eq 'Critical') { 'Critical' } elseif ($Details -and $Details.Severity -eq 'Warning') { 'Warning' } else { 'Info' }
+        $Samples = ($Group | ForEach-Object { $_.Certificate } | Where-Object { $_ } | Select-Object -Unique -First 3) -join '; '
+        $Findings.Add((New-Dot1xFinding -Severity $Severity -Source 'CAPI2' -Summary "$ErrorName in $($Group.Count) validation chain(s). Certificates: $Samples" -Recommendation $Hint -Count $Group.Count))
+    }
+
+    if ($BackgroundChains.Count -gt 0) {
+        $BackgroundNames = ($BackgroundChains | ForEach-Object { $_.Certificate } | Where-Object { $_ } | Select-Object -Unique -First 3) -join '; '
+        $Findings.Add((New-Dot1xFinding -Severity Info -Source 'CAPI2 (unrelated)' -Summary "$($BackgroundChains.Count) CAPI2 error chain(s) do not coincide with any NPS rejection and are probably background validations by Windows. Certificates: $BackgroundNames" -Recommendation 'Ignore them for the 802.1X analysis. They remain available in the CapiChains property.' -Count $BackgroundChains.Count))
     }
 
     # Client evidence
